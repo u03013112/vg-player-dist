@@ -6,7 +6,13 @@
     const warn = (...a) => console.warn(TAG, ...a);
     const err = (...a) => console.error(TAG, ...a);
 
+    // 逆向出的魔法常量,勿改。溯源:tmp/chunks/main-bbc478c8.1777296130811.js
+    // INTERFACE_KEY=IO.interfaceKey(响应解密) REQ_SIGN_KEY=Ky.requestHeaderKey(HmacSHA1)
+    // REQ_BODY_KEY=IO.parameterKey=IO.parameterIv(请求体 AES-CBC)
     const INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
+    const REQ_SIGN_KEY = 'jR6dO6fT1yD9zY7u';
+    const REQ_BODY_KEY = 'BxJand%xf5h3sycH';
+    const API_BASE = '/api/app';
     const VIDEO_CDN = 'https://s2s1.eaekgu.cn';
     const ENKEY_ENDPOINT = '/api/app/media/enkey';
     const PLAY_ENDPOINT = '/api/app/media/play';
@@ -128,23 +134,156 @@
         return decrypted.toString(CJS.enc.Utf8);
     }
 
-    async function fetchMediaPlay(id) {
-        const resp = await fetch(PLAY_ENDPOINT, {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({ id: id }),
+    // 站点自身的 X-User-Agent 字段包含运行时设备信息,无法离线重建。
+    // 策略:hook XHR+fetch 被动监听,任何出站 /api/app/* 请求都会带上真实值,
+    // 一捕到就存下;我们的请求不早于站点第一次 API 调用即可正常签名。
+    let capturedUA = null;
+    const uaWaiters = [];
+
+    function setCapturedUA(value) {
+        if (!value || capturedUA === value) return;
+        capturedUA = value;
+        log('captured X-User-Agent:', value.slice(0, 120));
+        while (uaWaiters.length) {
+            const w = uaWaiters.shift();
+            try { w(value); } catch (_) {}
+        }
+    }
+
+    function readHeader(headersLike, name) {
+        if (!headersLike) return null;
+        const key = name.toLowerCase();
+        if (typeof headersLike.get === 'function') {
+            return headersLike.get(name) || headersLike.get(key) || null;
+        }
+        if (Array.isArray(headersLike)) {
+            for (const [k, v] of headersLike) {
+                if (k && k.toLowerCase() === key) return v;
+            }
+            return null;
+        }
+        for (const k of Object.keys(headersLike)) {
+            if (k.toLowerCase() === key) return headersLike[k];
+        }
+        return null;
+    }
+
+    function installApiSniffer() {
+        if (window.__vgplayer_sniffer__) return;
+        window.__vgplayer_sniffer__ = true;
+
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+        XMLHttpRequest.prototype.open = function (method, url) {
+            this.__vg_url__ = url || '';
+            return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+            if (name && name.toLowerCase() === 'x-user-agent' && this.__vg_url__ && this.__vg_url__.indexOf(API_BASE) !== -1) {
+                setCapturedUA(value);
+            }
+            return origSetHeader.apply(this, arguments);
+        };
+
+        const origFetch = window.fetch;
+        if (origFetch) {
+            window.fetch = function (input, init) {
+                try {
+                    const url = typeof input === 'string' ? input : (input && input.url) || '';
+                    if (url && url.indexOf(API_BASE) !== -1) {
+                        const h = (init && init.headers) || (input && input.headers);
+                        const ua = readHeader(h, 'X-User-Agent');
+                        if (ua) setCapturedUA(ua);
+                    }
+                } catch (_) {}
+                return origFetch.apply(this, arguments);
+            };
+        }
+    }
+
+    function waitForUA(timeoutMs) {
+        if (capturedUA) return Promise.resolve(capturedUA);
+        return new Promise((resolve) => {
+            const to = setTimeout(() => {
+                const idx = uaWaiters.indexOf(resolve);
+                if (idx >= 0) uaWaiters.splice(idx, 1);
+                resolve(null);
+            }, timeoutMs);
+            uaWaiters.push((v) => { clearTimeout(to); resolve(v); });
         });
+    }
+
+    function getToken() {
+        try {
+            const t = localStorage.getItem('token');
+            return t && t.length > 0 ? t : '';
+        } catch (_) { return ''; }
+    }
+
+    function buildUuid() {
+        const hex = '0123456789abcdef';
+        const t = new Array(36);
+        for (let i = 0; i < 36; i++) t[i] = hex.charAt(Math.floor(Math.random() * 16));
+        t[14] = '4';
+        t[19] = hex.charAt((parseInt(t[19], 16) & 0x3) | 0x8);
+        t[8] = t[13] = t[18] = t[23] = '-';
+        return t.join('');
+    }
+
+    function buildApiKey(token, ua) {
+        const CJS = window.CryptoJS;
+        const ts = Math.floor(Date.now() / 1000);
+        const nonce = buildUuid();
+        const msg = (token || '') + '&' + API_BASE + '&' + ua + '&' + String(ts) + '&' + nonce;
+        const sign = CJS.HmacSHA1(msg, REQ_SIGN_KEY).toString(CJS.enc.Hex);
+        return 'timestamp=' + ts + ';sign=' + sign + ';nonce=' + nonce;
+    }
+
+    function encryptBody(obj) {
+        const CJS = window.CryptoJS;
+        const keys = Object.keys(obj || {}).filter((k) => obj[k] !== null && obj[k] !== undefined);
+        const compact = keys.reduce((a, k) => { a[k] = obj[k]; return a; }, {});
+        const plaintext = JSON.stringify(compact);
+        const key = CJS.enc.Utf8.parse(REQ_BODY_KEY);
+        const enc = CJS.AES.encrypt(CJS.enc.Utf8.parse(plaintext), key, {
+            iv: key, mode: CJS.mode.CBC, padding: CJS.pad.Pkcs7,
+        });
+        return CJS.enc.Base64.stringify(enc.ciphertext);
+    }
+
+    function signedRequest(method, path, payload) {
+        if (!capturedUA) throw new Error('X-User-Agent not captured yet');
+        const token = getToken();
+        const ua = capturedUA;
+        const apiKey = buildApiKey(token, ua);
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-Api-Key': apiKey,
+            'X-User-Agent': ua,
+        };
+        if (token) headers['Authorization'] = token;
+        const init = { method: method, credentials: 'include', headers: headers };
+        if (method === 'POST' || method === 'PUT') {
+            const body = payload && Object.keys(payload).length > 0
+                ? { data: encryptBody(payload) }
+                : {};
+            init.body = JSON.stringify(body);
+        }
+        return init;
+    }
+
+    async function fetchMediaPlay(id) {
+        const opts = signedRequest('POST', PLAY_ENDPOINT, { id: id });
+        const resp = await fetch(PLAY_ENDPOINT, opts);
         if (!resp.ok) throw new Error('media/play HTTP ' + resp.status);
         const body = await resp.json();
         if (typeof body.data !== 'string') throw new Error('media/play: no data field');
         const plain = qyDecrypt(body.data);
         const obj = JSON.parse(plain);
+        if (!obj || typeof obj !== 'object') throw new Error('media/play decrypted non-object: ' + plain.slice(0, 200));
         if (!obj.mediaInfo || !obj.mediaInfo.videoUrl) {
-            throw new Error('media/play: no mediaInfo.videoUrl');
+            throw new Error('media/play: no mediaInfo.videoUrl; body=' + plain.slice(0, 400));
         }
         return obj;
     }
@@ -253,6 +392,19 @@
                         const target = location.origin + ENKEY_ENDPOINT;
                         xhr.open('GET', target, true);
                         xhr.withCredentials = true;
+                        try {
+                            const token = getToken();
+                            const ua = capturedUA;
+                            if (ua && window.CryptoJS) {
+                                xhr.setRequestHeader('X-Api-Key', buildApiKey(token, ua));
+                                xhr.setRequestHeader('X-User-Agent', ua);
+                                if (token) xhr.setRequestHeader('Authorization', token);
+                            } else {
+                                warn('enkey xhr: UA 或 CryptoJS 未就绪,可能取 key 失败');
+                            }
+                        } catch (e) {
+                            err('enkey xhr sign 失败', e);
+                        }
                     }
                 },
             });
@@ -261,7 +413,6 @@
             return { hls: hls, native: false };
         }
 
-        // iOS Safari 原生 HLS fallback;若 key URI 仍是占位符会直接失败。
         video.src = m3u8Url;
         return { hls: null, native: true };
     }
@@ -276,11 +427,23 @@
         }
         log('启动,id=', id);
 
+        installApiSniffer();
+
         let ctx = null;
         try {
             await ensureDeps();
             ensurePlyrCss();
             injectOverlayStyle();
+
+            if (!capturedUA) {
+                log('等待站点自身 API 请求以捕获 X-User-Agent (最多 8s)...');
+                const ua = await waitForUA(8000);
+                if (!ua) {
+                    alert('[VGPlayer] 未能捕获站点签名所需的 X-User-Agent\n请先在页面上滚动/切页触发一次普通 API 调用,再点 VG Player');
+                    window.__vgplayer_started__ = false;
+                    return;
+                }
+            }
 
             const info = await fetchMediaPlay(id);
             const title = info.mediaInfo.title || ('video ' + id);
