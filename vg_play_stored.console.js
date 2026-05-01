@@ -44,13 +44,17 @@
 
     var wrap = document.createElement('div');
     wrap.id = '__vg_wrap__';
-    wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:#000;display:flex;flex-direction:column;';
+    wrap.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:2147483646;background:#000;display:flex;flex-direction:column;transform-origin:center center;transition:transform .2s;';
 
     var bar = document.createElement('div');
     bar.style.cssText = 'height:40px;background:#111;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font:13px/1 -apple-system,sans-serif;flex-shrink:0;';
     bar.innerHTML =
       '<span id="__vg_status__">' + (rec.title || 'loading...') + '</span>' +
-      '<button id="__vg_close__" style="background:#e33;color:#fff;border:0;padding:6px 14px;border-radius:4px;">× 关闭</button>';
+      '<div style="display:flex;gap:8px;">' +
+        '<button id="__vg_rotate__" style="background:#37a;color:#fff;border:0;padding:6px 10px;border-radius:4px;">⟳ 旋转</button>' +
+        '<button id="__vg_fs__" style="background:#555;color:#fff;border:0;padding:6px 10px;border-radius:4px;">⛶ 全屏</button>' +
+        '<button id="__vg_close__" style="background:#e33;color:#fff;border:0;padding:6px 14px;border-radius:4px;">× 关闭</button>' +
+      '</div>';
 
     var vid = document.createElement('video');
     vid.id = '__vg_video__';
@@ -66,7 +70,7 @@
     var floatBox = document.createElement('div');
     floatBox.id = '__vg_float__';
     floatBox.style.cssText = [
-      'position:fixed', 'left:50%', 'top:50%', 'transform:translate(-50%,-50%)',
+      'position:absolute', 'left:50%', 'top:50%', 'transform:translate(-50%,-50%)',
       'z-index:2147483647', 'background:rgba(0,0,0,0.7)', 'color:#fff',
       'padding:16px 20px', 'border-radius:12px', 'display:flex',
       'flex-direction:column', 'gap:10px', 'width:82%', 'max-width:380px',
@@ -86,7 +90,7 @@
         '<button data-d="10"  class="__vg_seek__" style="background:#333;color:#fff;border:0;padding:10px 12px;border-radius:6px;">+10s</button>' +
         '<button id="__vg_hide__" style="background:#555;color:#fff;border:0;padding:10px 10px;border-radius:6px;" title="隐藏(双击视频恢复)">▽</button>' +
       '</div>';
-    document.body.appendChild(floatBox);
+    wrap.appendChild(floatBox);
 
     var status = document.getElementById('__vg_status__');
     var track = document.getElementById('__vg_track__');
@@ -101,7 +105,58 @@
 
     document.getElementById('__vg_close__').onclick = function () {
       if (window.__vg_hls_inst) { try { window.__vg_hls_inst.destroy(); } catch (e) {} }
-      wrap.remove(); floatBox.remove();
+      wrap.remove();
+    };
+
+    var rotated = false;
+    function applyLayout() {
+      var vw = window.innerWidth, vh = window.innerHeight;
+      if (rotated) {
+        wrap.style.width = vh + 'px';
+        wrap.style.height = vw + 'px';
+        wrap.style.left = (vw - vh) / 2 + 'px';
+        wrap.style.top = (vh - vw) / 2 + 'px';
+        wrap.style.transform = 'rotate(90deg)';
+      } else {
+        wrap.style.width = '100vw';
+        wrap.style.height = '100vh';
+        wrap.style.left = '0';
+        wrap.style.top = '0';
+        wrap.style.transform = 'none';
+      }
+    }
+    function autoRotateOnMeta() {
+      var vw = window.innerWidth, vh = window.innerHeight;
+      var screenPortrait = vh > vw;
+      var videoLandscape = vid.videoWidth > vid.videoHeight && vid.videoWidth > 0;
+      if (screenPortrait && videoLandscape && !rotated) {
+        rotated = true;
+        applyLayout();
+        setStatus('↻ 自动旋转至横屏');
+      }
+    }
+    vid.addEventListener('loadedmetadata', autoRotateOnMeta);
+    window.addEventListener('resize', applyLayout);
+    window.addEventListener('orientationchange', function () {
+      setTimeout(function () { rotated = false; applyLayout(); autoRotateOnMeta(); }, 300);
+    });
+
+    document.getElementById('__vg_rotate__').onclick = function () {
+      rotated = !rotated;
+      applyLayout();
+    };
+
+    document.getElementById('__vg_fs__').onclick = function () {
+      var el = wrap;
+      var req = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitEnterFullscreen;
+      var vreq = vid.webkitEnterFullscreen;
+      if (req) {
+        try { req.call(el); return; } catch (e) {}
+      }
+      if (vreq) {
+        try { vreq.call(vid); return; } catch (e) {}
+      }
+      alert('本浏览器不支持容器全屏,已是沉浸式遮罩状态');
     };
     pp.onclick = function () { vid.paused ? vid.play() : vid.pause(); };
     document.querySelectorAll('.__vg_seek__').forEach(function (b) {
@@ -115,7 +170,13 @@
     function seekFromEvt(e) {
       var r = track.getBoundingClientRect();
       var cx = e.touches ? e.touches[0].clientX : e.clientX;
-      var pct = Math.max(0, Math.min(1, (cx - r.left) / r.width));
+      var cy = e.touches ? e.touches[0].clientY : e.clientY;
+      var pct;
+      if (rotated) {
+        pct = Math.max(0, Math.min(1, (cy - r.top) / r.height));
+      } else {
+        pct = Math.max(0, Math.min(1, (cx - r.left) / r.width));
+      }
       if (vid.duration) vid.currentTime = pct * vid.duration;
     }
     var dragging = false;
