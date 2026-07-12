@@ -21,6 +21,7 @@
   // ==========================================================================
   var STORAGE_KEY = '__vg_full_url__';
   var FAB_ID = '__vg_fab__';
+  var DEFAULT_HOOK_TIMEOUT_MS = 10000;
 
   var log = function (m) { try { console.log('[vg]', m); } catch (e) {} };
 
@@ -295,8 +296,19 @@
       var got = await cfg.fallback.fetch(id);
       return saveRecord(id, got.title, got.fullUrl, got.videoUrl);
     }
-    // 无 fallback:纯拦截,不设超时,一直等到站点自己发起播放请求
-    var url = await waitForHook(null);
+    // 无 fallback:纯拦截。给一个较宽松的超时(而不是无限等),避免"视频在
+    // 点书签前就已经自动播完加载"导致的请求错过拦截窗口时,监听器孤儿挂在
+    // 后台,后续切到别的视频才被"捡"到、时序错位导致黑屏。
+    var url = await waitForHook(DEFAULT_HOOK_TIMEOUT_MS);
+    if (!url) {
+      var cachedGeneric = loadCachedRecord();
+      if (cachedGeneric) return cachedGeneric;
+      throw new Error(
+        DEFAULT_HOOK_TIMEOUT_MS / 1000 + ' 秒内未拦截到播放请求 — ' +
+        '很可能是视频在点书签之前就已经自动播完加载了(拦截错过窗口)。' +
+        '请退出这个视频重新进入一次,或切到下一个视频后再点书签。'
+      );
+    }
     return saveRecord(id, document.title, url);
   }
 

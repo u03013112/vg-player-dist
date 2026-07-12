@@ -7,6 +7,7 @@
   var CRYPTO_JS_SRC = 'https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js';
   var HLS_JS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
   var STORAGE_KEY = '__vg_full_url__';
+  var DEFAULT_HOOK_TIMEOUT_MS = 10000;
 
   var log = function (m) { try { console.log('[vg-player]', m); } catch (e) {} };
 
@@ -604,16 +605,26 @@
       throw new Error('拦截超时且当前非详情页,又没有缓存 — 请先进入视频详情页并点击播放');
     }
 
-    // 无 fallback 的站点(ksXVideo 及未来新站):纯拦截,不设超时。
-    // 只有在“非详情页 + 已有缓存”时才直接复用缓存;否则一直等站点自己
-    // 发起播放请求(不管是不是详情页,SPA 内的视频信息流一样能拦截到)。
+    // 无 fallback 的站点(ksXVideo 及未来新站):纯拦截。
+    // 只有在“非详情页 + 已有缓存”时才直接复用缓存;否则等站点自己发起
+    // 播放请求(不管是不是详情页,SPA 内的视频信息流一样能拦截到)。
+    // 给一个较宽松的超时(而不是无限等),避免"视频在点书签前就已经自动
+    // 播完加载"导致的请求错过拦截窗口时,脚本静默卡死不报错。
     if (!id && cached) {
       return { rec: cached, note: 'cached' };
     }
     showWaitHint('等待视频开始播放…');
-    var url = await waitForHook(null);
+    var genericUrl = await waitForHook(DEFAULT_HOOK_TIMEOUT_MS);
     hideWaitHint();
-    return { rec: saveRecord(id, document.title, url), note: 'hooked' };
+    if (!genericUrl) {
+      if (cached) return { rec: cached, note: 'cached(拦截超时)' };
+      throw new Error(
+        DEFAULT_HOOK_TIMEOUT_MS / 1000 + ' 秒内未拦截到播放请求 — ' +
+        '很可能是视频在点书签之前就已经自动播完加载了(拦截错过窗口)。' +
+        '请退出这个视频重新进入一次,或切到下一个视频后再点书签。'
+      );
+    }
+    return { rec: saveRecord(id, document.title, genericUrl), note: 'hooked' };
   }
 
   async function main() {
