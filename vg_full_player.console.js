@@ -69,7 +69,7 @@
     return { ts: ts, nonce: nonce, sign: sign };
   }
 
-  // 移植自 src/k5j7u_com/decrypt_media_play.py:
+  // 移植自 reference/k5j7u_legacy/src/decrypt_media_play.py:
   // salt = raw[:12], base_key+salt 经 SHA256 编织派生 key(32B)/iv(16B), AES-256-CBC/PKCS7
   function qyDecrypt(b64) {
     var C = CryptoJS;

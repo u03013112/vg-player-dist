@@ -64,7 +64,7 @@
         return Number.isFinite(n) && n > 0 ? n : null;
     }
 
-    // qy KDF — 与 Python src/k5j7u_com/decrypt_media_play.py::decrypt_butterfly 逐字节对齐,
+    // qy KDF — 与 Python reference/k5j7u_legacy/src/decrypt_media_play.py::decrypt_butterfly 逐字节对齐,
     // 任何偏移改动都会让所有 /api/app/* 响应解密失败:
     //   raw = base64(data); salt = raw[:12]; ct = raw[12:]
     //   o = INTERFACE_KEY (32B) + salt (12B) = 44B; n = 22

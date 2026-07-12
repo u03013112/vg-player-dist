@@ -1,11 +1,12 @@
 // ==UserScript==
-// @name         VG Player (Butterfly 完整片)
+// @name         VG Player (Butterfly 完整片 · 多站统一版)
 // @namespace    https://github.com/u03013112/video_grabber_91
-// @version      3.0.0
-// @description  走 /api/app/media/play API 拿完整视频 m3u8,内置悬浮播放按钮 + hls.js 全屏播放器
+// @version      4.0.0
+// @description  网络拦截式统一取流(优先),k5 站超时自动 fallback 到 /api/app/media/play 主动请求;内置悬浮播放按钮 + hls.js 全屏播放器
 // @author       u03013112
 // @match        https://dsq3p4z6gl5ag.cloudfront.net/*
 // @match        https://k5j7u.com/*
+// @match        https://d270v74snrdyr6.cloudfront.net/*
 // @run-at       document-idle
 // @grant        none
 // @require      https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js
@@ -15,49 +16,65 @@
 (function () {
   'use strict';
 
-  var REQ_SIGN_KEY = 'jR6dO6fT1yD9zY7u';
-  var INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
-  var API_BASE = '/api/app';
-  var CDN_FALLBACK = 'https://s2s1.eaekgu.cn';
+  // ==========================================================================
+  // 通用常量
+  // ==========================================================================
   var STORAGE_KEY = '__vg_full_url__';
   var FAB_ID = '__vg_fab__';
 
   var log = function (m) { try { console.log('[vg]', m); } catch (e) {} };
 
-  function isDetailPage() { return /[?&]id=/.test(location.href) && /movieDetails/i.test(location.pathname); }
-  function getIdFromUrl() { var m = location.href.match(/[?&]id=([^&]+)/); return m ? decodeURIComponent(m[1]) : null; }
-  function getToken() {
+  function getIdFromUrl() {
+    var m = location.href.match(/[?&]id=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  function isDetailLikePage() {
+    // 详情页(?id=)或短视频/信息流路由(无 id 但仍可能自动触发原生播放请求)
+    return true;
+  }
+
+  // ==========================================================================
+  // k5 (dsq3p4z6gl5ag.cloudfront.net / k5j7u.com) 专属 fallback:
+  // 主动伪造签名请求拿完整片源。逆向出来的签名/加密逻辑,一字不改,仅在
+  // “网络拦截超时未命中”时才会被调用,不再是唯一路径。
+  // ==========================================================================
+  var K5_REQ_SIGN_KEY = 'jR6dO6fT1yD9zY7u';
+  var K5_INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
+  var K5_API_BASE = '/api/app';
+  var K5_CDN_FALLBACK = 'https://s2s1.eaekgu.cn';
+
+  function k5GetToken() {
     var raw = localStorage.getItem('token');
     if (!raw) return null;
     try { return JSON.parse(raw); } catch (e) { return raw; }
   }
-  function getSid() {
+  function k5GetSid() {
     var raw = localStorage.getItem('__web_sdk_sid__') || '';
     try { var obj = JSON.parse(raw); return obj && obj.sid ? obj.sid : ''; } catch (e) { return ''; }
   }
-  function getCdnHost() {
+  function k5GetCdnHost() {
     try {
       var g = JSON.parse(sessionStorage.getItem('global') || '{}');
       if (g && g.videoRoadLine && g.videoRoadLine.url) return g.videoRoadLine.url;
     } catch (e) {}
-    return CDN_FALLBACK;
+    return K5_CDN_FALLBACK;
   }
-  function buildUA(sid) {
+  function k5BuildUA(sid) {
     return 'DevType=Apple iPhone mobile;SysType=h5_ios;Ver=1.0.0;BuildID=Mobile Safari 17.0;DeviceBrand=Apple;DeviceModel=iPhone;SystemName=Android;SystemVersion=6.0;Sid=' + sid;
   }
-  function uuid() {
+  function k5Uuid() {
     var hex = '0123456789abcdef', s = '';
     for (var i = 0; i < 32; i++) s += hex[(Math.random() * 16) | 0];
     return s.slice(0, 8) + '-' + s.slice(8, 12) + '-' + s.slice(12, 16) + '-' + s.slice(16, 20) + '-' + s.slice(20);
   }
-  function signApiKey(token, ua) {
+  function k5SignApiKey(token, ua) {
     var ts = String(Date.now());
-    var nonce = uuid();
-    var msg = token + '&' + API_BASE + '&' + ua + '&' + ts + '&' + nonce;
-    var sign = CryptoJS.HmacSHA1(msg, REQ_SIGN_KEY).toString(CryptoJS.enc.Hex);
+    var nonce = k5Uuid();
+    var msg = token + '&' + K5_API_BASE + '&' + ua + '&' + ts + '&' + nonce;
+    var sign = CryptoJS.HmacSHA1(msg, K5_REQ_SIGN_KEY).toString(CryptoJS.enc.Hex);
     return { ts: ts, nonce: nonce, sign: sign };
   }
-  function strToBytes(s) {
+  function k5StrToBytes(s) {
     var out = [];
     for (var i = 0; i < s.length; i++) {
       var c = s.charCodeAt(i);
@@ -67,56 +84,56 @@
     }
     return out;
   }
-  function wordsToBytes(words, sigBytes) {
+  function k5WordsToBytes(words, sigBytes) {
     var out = [];
     for (var i = 0; i < sigBytes; i++) out.push((words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff);
     return out;
   }
-  function bytesToWordArray(bytes) {
+  function k5BytesToWordArray(bytes) {
     var words = [];
     for (var i = 0; i < bytes.length; i++) {
       words[i >>> 2] = (words[i >>> 2] || 0) | (bytes[i] << (24 - (i % 4) * 8));
     }
     return CryptoJS.lib.WordArray.create(words, bytes.length);
   }
-  function sha256Bytes(bytes) {
-    var digest = CryptoJS.SHA256(bytesToWordArray(bytes));
-    return wordsToBytes(digest.words, digest.sigBytes);
+  function k5Sha256Bytes(bytes) {
+    var digest = CryptoJS.SHA256(k5BytesToWordArray(bytes));
+    return k5WordsToBytes(digest.words, digest.sigBytes);
   }
 
-  // 移植自 src/k5j7u_com/decrypt_media_play.py:
+  // 移植自 reference/k5j7u_legacy/src/decrypt_media_play.py:
   // salt=raw[:12], base_key+salt 经 SHA256 编织派生 key(32B)/iv(16B), AES-256-CBC/PKCS7
-  function qyDecrypt(b64) {
+  function k5QyDecrypt(b64) {
     var raw = CryptoJS.enc.Base64.parse(b64);
-    var rawBytes = wordsToBytes(raw.words, raw.sigBytes);
+    var rawBytes = k5WordsToBytes(raw.words, raw.sigBytes);
     if (rawBytes.length < 12) throw new Error('payload too short');
     var salt = rawBytes.slice(0, 12);
     var cipher = rawBytes.slice(12);
-    var baseKey = strToBytes(INTERFACE_KEY);
+    var baseKey = k5StrToBytes(K5_INTERFACE_KEY);
     var o = baseKey.concat(salt);
     var n = Math.floor(o.length / 2);
-    var l = sha256Bytes(o).slice(8, 24);
-    var p = sha256Bytes(l.concat(o.slice(0, n)));
-    var u = sha256Bytes(o.slice(n).concat(l));
+    var l = k5Sha256Bytes(o).slice(8, 24);
+    var p = k5Sha256Bytes(l.concat(o.slice(0, n)));
+    var u = k5Sha256Bytes(o.slice(n).concat(l));
     var key = p.slice(0, 8).concat(u.slice(8, 24)).concat(p.slice(24, 32));
     var iv = u.slice(0, 4).concat(p.slice(12, 20)).concat(u.slice(28, 32));
     if (key.length !== 32) throw new Error('key len ' + key.length);
     if (iv.length !== 16) throw new Error('iv len ' + iv.length);
     var d = CryptoJS.AES.decrypt(
-      { ciphertext: bytesToWordArray(cipher) },
-      bytesToWordArray(key),
-      { iv: bytesToWordArray(iv), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+      { ciphertext: k5BytesToWordArray(cipher) },
+      k5BytesToWordArray(key),
+      { iv: k5BytesToWordArray(iv), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
     );
     return d.toString(CryptoJS.enc.Utf8);
   }
 
-  async function probeFullUrl(id) {
-    var token = getToken();
+  async function k5ActiveFetch(id) {
+    var token = k5GetToken();
     if (!token) throw new Error('未登录: localStorage.token 缺失');
-    var sid = getSid();
-    var ua = buildUA(sid);
-    var sig = signApiKey(token, ua);
-    var resp = await fetch(API_BASE + '/media/play', {
+    var sid = k5GetSid();
+    var ua = k5BuildUA(sid);
+    var sig = k5SignApiKey(token, ua);
+    var resp = await fetch(K5_API_BASE + '/media/play', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -131,26 +148,162 @@
     if (!resp.ok) throw new Error('media/play HTTP ' + resp.status);
     var j = await resp.json();
     if (!j || typeof j.data !== 'string') throw new Error('media/play 响应异常');
-    var outer = JSON.parse(qyDecrypt(j.data));
+    var outer = JSON.parse(k5QyDecrypt(j.data));
     var info = outer.mediaInfo || outer;
     if (!info.videoUrl) throw new Error('mediaInfo.videoUrl 为空');
-    var sig2 = signApiKey(token, ua);
+    var sig2 = k5SignApiKey(token, ua);
     var path = info.videoUrl.replace(/^\/+/, '');
-    var fullUrl = API_BASE + '/media/h5/m3u8/' + path +
+    var fullUrl = K5_API_BASE + '/media/h5/m3u8/' + path +
       '?token=' + encodeURIComponent(token) +
       '&timestamp=' + sig2.ts +
       '&sign=' + sig2.sign +
       '&nonce=' + sig2.nonce +
-      '&c=' + encodeURIComponent(getCdnHost());
-    var rec = {
-      id: id, title: info.title || '', videoUrl: info.videoUrl,
-      fullUrl: fullUrl, origin: location.origin, savedAt: Date.now()
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(rec));
-    log('✅ probed: ' + rec.title + ' (' + id + ')');
-    return rec;
+      '&c=' + encodeURIComponent(k5GetCdnHost());
+    return { title: info.title || '', videoUrl: info.videoUrl, fullUrl: fullUrl };
   }
 
+  // ==========================================================================
+  // 通用:广告/弹窗遮罩清理
+  // ==========================================================================
+  var AD_SELECTORS = ['.van-overlay', '.van-popup', '.tipBox', '.vue-nice-modal-root'];
+
+  function sweepAds() {
+    AD_SELECTORS.forEach(function (sel) {
+      try { document.querySelectorAll(sel).forEach(function (el) { el.remove(); }); } catch (e) {}
+    });
+  }
+  function startAdCleaner() {
+    sweepAds();
+    try {
+      var mo = new MutationObserver(sweepAds);
+      mo.observe(document.body, { childList: true, subtree: true });
+      return mo;
+    } catch (e) { return null; }
+  }
+
+  // ==========================================================================
+  // 通用:截断后缀去除(见 ksxvideo_fm/README.md 的 _0001 案例)
+  // ==========================================================================
+  var TRUNCATE_SUFFIX_RE = /_0\d*(\.m3u8)(\?|$)/i;
+  function stripTruncationSuffix(url) {
+    if (typeof url !== 'string') return url;
+    return url.replace(TRUNCATE_SUFFIX_RE, '$1$2');
+  }
+
+  // ==========================================================================
+  // 通用:网络拦截模块(可重复 waitForHook 的可替换回调设计,见 console.js 同名注释)
+  // ==========================================================================
+  function installNetworkHook() {
+    if (window.__vg_hook_installed__) return;
+    window.__vg_hook_installed__ = true;
+
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      var args = Array.prototype.slice.call(arguments);
+      if (typeof url === 'string' && url.indexOf('.m3u8') !== -1) {
+        var fixed = stripTruncationSuffix(url);
+        if (fixed !== url) log('拦截到截断后缀,已改写: ' + url + ' -> ' + fixed);
+        args[1] = fixed;
+        if (window.__vg_hook_listener__) {
+          try { window.__vg_hook_listener__(fixed); } catch (e) {}
+        }
+      }
+      return origOpen.apply(this, args);
+    };
+
+    var origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = function (input, init) {
+        var args = Array.prototype.slice.call(arguments);
+        var u = (typeof input === 'string') ? input : (input && input.url);
+        if (typeof u === 'string' && u.indexOf('.m3u8') !== -1) {
+          var fixed = stripTruncationSuffix(u);
+          if (fixed !== u) {
+            log('拦截到截断后缀,已改写: ' + u + ' -> ' + fixed);
+            args[0] = (typeof input === 'string') ? fixed : new Request(fixed, init);
+          }
+          if (window.__vg_hook_listener__) {
+            try { window.__vg_hook_listener__(fixed); } catch (e) {}
+          }
+        }
+        return origFetch.apply(this, args);
+      };
+    }
+  }
+
+  function waitForHook(timeoutMs) {
+    installNetworkHook();
+    return new Promise(function (resolve) {
+      var settled = false;
+      window.__vg_hook_listener__ = function (url) {
+        if (settled) return;
+        settled = true;
+        window.__vg_hook_listener__ = null;
+        resolve(url);
+      };
+      if (timeoutMs != null) {
+        setTimeout(function () {
+          if (settled) return;
+          settled = true;
+          window.__vg_hook_listener__ = null;
+          resolve(null);
+        }, timeoutMs);
+      }
+    });
+  }
+
+  // ==========================================================================
+  // 通用:localStorage 缓存
+  // ==========================================================================
+  function saveRecord(id, title, fullUrl, videoUrl) {
+    var record = {
+      id: id || null, title: title || '', videoUrl: videoUrl,
+      fullUrl: fullUrl, origin: location.origin, savedAt: Date.now()
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+    log('✅ 已缓存: ' + record.title);
+    return record;
+  }
+  function loadCachedRecord() {
+    try {
+      var rec = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+      return (rec && rec.fullUrl) ? rec : null;
+    } catch (e) { return null; }
+  }
+
+  // ==========================================================================
+  // 站点配置
+  // ==========================================================================
+  var K5_SITE_CONFIG = { id: 'k5j7u', fallback: { timeoutMs: 2000, fetch: k5ActiveFetch } };
+  var DEFAULT_SITE_CONFIG = { id: 'generic', fallback: null };
+  var SITE_CONFIGS = {
+    'dsq3p4z6gl5ag.cloudfront.net': K5_SITE_CONFIG,
+    'k5j7u.com': K5_SITE_CONFIG
+  };
+  function getSiteConfig() { return SITE_CONFIGS[location.hostname] || DEFAULT_SITE_CONFIG; }
+
+  // 解析当前应该播放的 record:优先网络拦截,k5 超时才退回主动请求方案
+  async function resolveRecord(id, cfg) {
+    if (cfg.fallback) {
+      var hookedUrl = await waitForHook(cfg.fallback.timeoutMs);
+      if (hookedUrl) return saveRecord(id, document.title, hookedUrl);
+      if (!id) {
+        var cached = loadCachedRecord();
+        if (cached) return cached;
+        throw new Error('拦截超时且非详情页,又没有缓存');
+      }
+      var got = await cfg.fallback.fetch(id);
+      return saveRecord(id, got.title, got.fullUrl, got.videoUrl);
+    }
+    // 无 fallback:纯拦截,不设超时,一直等到站点自己发起播放请求
+    var url = await waitForHook(null);
+    return saveRecord(id, document.title, url);
+  }
+
+  // ==========================================================================
+  // 通用:播放器 UI(与 bookmarklet/vg_player.console.js 的 mount() 逻辑一致,
+  // 仅函数名沿用 user.js 原有的 mountPlayer 命名,内部实现原样保留)
+  // ==========================================================================
   function fmt(s) {
     if (!isFinite(s)) return '0:00';
     s = Math.max(0, s | 0);
@@ -272,6 +425,9 @@
     hls.attachMedia(vid);
   }
 
+  // ==========================================================================
+  // 悬浮播放按钮(FAB):点击时若已有可用缓存直接播,否则触发一次 resolveRecord()
+  // ==========================================================================
   function setFabState(state, text) {
     var fab = document.getElementById(FAB_ID);
     if (!fab) return;
@@ -296,47 +452,45 @@
     fab.textContent = '...';
     fab.dataset.state = 'idle';
     fab.addEventListener('click', async function () {
-      var rec;
-      try { rec = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) {}
-      if (!rec || !rec.fullUrl) {
-        if (isDetailPage()) {
-          setFabState('loading', '抓取中');
-          try {
-            rec = await probeFullUrl(getIdFromUrl());
-            setFabState('ready', '▶ 播放');
-          } catch (e) {
-            setFabState('error', '失败');
-            alert('[vg] 获取失败: ' + e.message);
-            return;
-          }
-        } else {
-          alert('[vg] 尚无可播资源\n请先在视频详情页让脚本自动抓取');
-          return;
-        }
+      var id = getIdFromUrl();
+      var cached = loadCachedRecord();
+      if (cached && (!id || String(cached.id) === String(id))) {
+        mountPlayer(cached);
+        return;
       }
-      mountPlayer(rec);
+      setFabState('loading', '抓取中');
+      try {
+        var cfg = getSiteConfig();
+        var rec = await resolveRecord(id, cfg);
+        setFabState('ready', '▶ 播放');
+        mountPlayer(rec);
+      } catch (e) {
+        setFabState('error', '失败');
+        alert('[vg] 获取失败: ' + e.message);
+      }
     });
     document.body.appendChild(fab);
   }
 
-  async function autoProbeOnDetail() {
-    if (!isDetailPage()) return;
+  // 页面/路由变化时,后台静默尝试一次 resolveRecord(),提前把 FAB 状态刷新成
+  // “ready”——命中原生自动播放请求或者 k5 fallback 都会在这里被捕获。
+  async function autoResolveOnRoute() {
+    if (!isDetailLikePage()) return;
     var id = getIdFromUrl();
-    if (!id) return;
-    var existing = null;
-    try { existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) {}
-    if (existing && String(existing.id) === String(id) && (Date.now() - existing.savedAt < 10 * 60 * 1000)) {
+    var cached = loadCachedRecord();
+    if (cached && id && String(cached.id) === String(id) && (Date.now() - cached.savedAt < 10 * 60 * 1000)) {
       setFabState('ready', '▶ 播放');
-      log('复用缓存: ' + existing.title);
+      log('复用缓存: ' + cached.title);
       return;
     }
     setFabState('loading', '抓取中');
     try {
-      await probeFullUrl(id);
+      var cfg = getSiteConfig();
+      await resolveRecord(id, cfg);
       setFabState('ready', '▶ 播放');
     } catch (e) {
-      setFabState('error', '失败');
-      log('autoProbe 失败: ' + e.message);
+      setFabState('idle', '...');
+      log('autoResolve 未命中: ' + e.message);
     }
   }
 
@@ -346,7 +500,7 @@
       if (location.href !== lastHref) {
         lastHref = location.href;
         log('route -> ' + location.href);
-        autoProbeOnDetail();
+        autoResolveOnRoute();
       }
     }, 800);
   }
@@ -354,10 +508,11 @@
   function init() {
     if (window.__vg_inited__) return;
     window.__vg_inited__ = true;
+    startAdCleaner();
     ensureFab();
-    autoProbeOnDetail();
+    autoResolveOnRoute();
     watchRouteChange();
-    log('VG Player inited, match=' + location.href);
+    log('VG Player(统一版) inited, match=' + location.href);
   }
 
   if (document.readyState === 'loading') {
