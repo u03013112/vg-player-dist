@@ -7,7 +7,6 @@
   var CRYPTO_JS_SRC = 'https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js';
   var HLS_JS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
   var STORAGE_KEY = '__vg_full_url__';
-  var DEFAULT_HOOK_TIMEOUT_MS = 10000;
 
   var log = function (m) { try { console.log('[vg-player]', m); } catch (e) {} };
 
@@ -28,22 +27,21 @@
   }
 
   // ==========================================================================
-  // k5 (dsq3p4z6gl5ag.cloudfront.net / k5j7u.com) 专属 fallback:
-  // 主动伪造签名请求拿完整片源。逆向出来的签名/加密逻辑,一字不改,仅在
-  // “网络拦截超时未命中”时才会被调用,不再是唯一路径。
+  // 通用:主动请求方案(k5j7u / ksXVideo 共用同一套签名+解密算法和 key ——
+  // 两站被逆向确认是同一运营方的马甲站,连 REQ_SIGN_KEY/INTERFACE_KEY 都没换,
+  // 只是请求头组装格式、时间戳单位、m3u8 URL 参数略有不同,见 SITE_CONFIGS)。
   // ==========================================================================
-  var K5_REQ_SIGN_KEY = 'jR6dO6fT1yD9zY7u';
-  var K5_INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
-  var K5_API_BASE = '/api/app';
-  var K5_CDN_FALLBACK = 'https://s2s1.eaekgu.cn';
+  var REQ_SIGN_KEY = 'jR6dO6fT1yD9zY7u';
+  var INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
+  var CDN_FALLBACK = 'https://s2s1.eaekgu.cn';
 
-  function k5GetToken() {
+  function getToken() {
     var raw = localStorage.getItem('token');
     if (!raw) throw new Error('localStorage.token 不存在 — 请先在浏览器里进过首页/登录');
     try { return JSON.parse(raw); } catch (e) { return raw; }
   }
 
-  function k5GetSid() {
+  function getSid() {
     var raw = localStorage.getItem('__web_sdk_sid__') || '';
     try {
       var obj = JSON.parse(raw);
@@ -51,34 +49,36 @@
     } catch (e) { return ''; }
   }
 
-  function k5GetCdnHost() {
+  function getCdnHost() {
     try {
       var g = JSON.parse(sessionStorage.getItem('global') || '{}');
       if (g && g.videoRoadLine && g.videoRoadLine.url) return g.videoRoadLine.url;
     } catch (e) {}
-    return K5_CDN_FALLBACK;
+    return CDN_FALLBACK;
   }
 
-  function k5BuildUA(sid) {
+  function buildUA(sid) {
     return 'DevType=Apple iPhone mobile;SysType=h5_ios;Ver=1.0.0;BuildID=Mobile Safari 17.0;DeviceBrand=Apple;DeviceModel=iPhone;SystemName=Android;SystemVersion=6.0;Sid=' + sid;
   }
 
-  function k5Uuid() {
+  function uuid() {
     var hex = '0123456789abcdef';
     var s = '';
     for (var i = 0; i < 32; i++) s += hex[(Math.random() * 16) | 0];
     return s.slice(0, 8) + '-' + s.slice(8, 12) + '-' + s.slice(12, 16) + '-' + s.slice(16, 20) + '-' + s.slice(20);
   }
 
-  function k5SignApiKey(token, ua) {
-    var ts = String(Date.now());
-    var nonce = k5Uuid();
-    var msg = token + '&' + K5_API_BASE + '&' + ua + '&' + ts + '&' + nonce;
-    var sign = CryptoJS.HmacSHA1(msg, K5_REQ_SIGN_KEY).toString(CryptoJS.enc.Hex);
+  // 时间戳单位按站点配置(k5 用毫秒,ksXVideo 用秒),消息结构固定:
+  // token & apiPath & XUserAgent & timestamp & nonce,HmacSHA1 签名。
+  function computeSign(cfg, token, apiPath, ua) {
+    var ts = cfg.tsUnit === 's' ? String(Math.floor(Date.now() / 1000)) : String(Date.now());
+    var nonce = uuid();
+    var msg = (token || '') + '&' + apiPath + '&' + ua + '&' + ts + '&' + nonce;
+    var sign = CryptoJS.HmacSHA1(msg, REQ_SIGN_KEY).toString(CryptoJS.enc.Hex);
     return { ts: ts, nonce: nonce, sign: sign };
   }
 
-  function k5StrToBytes(s) {
+  function strToBytes(s) {
     var out = [];
     for (var i = 0; i < s.length; i++) {
       var c = s.charCodeAt(i);
@@ -88,43 +88,45 @@
     }
     return out;
   }
-  function k5WordsToBytes(words, sigBytes) {
+  function wordsToBytes(words, sigBytes) {
     var out = [];
     for (var i = 0; i < sigBytes; i++) {
       out.push((words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff);
     }
     return out;
   }
-  function k5BytesToWordArray(bytes) {
+  function bytesToWordArray(bytes) {
     var words = [];
     for (var i = 0; i < bytes.length; i++) {
       words[i >>> 2] = (words[i >>> 2] || 0) | (bytes[i] << (24 - (i % 4) * 8));
     }
     return CryptoJS.lib.WordArray.create(words, bytes.length);
   }
-  function k5Sha256Bytes(bytes) {
-    var wa = k5BytesToWordArray(bytes);
+  function sha256Bytes(bytes) {
+    var wa = bytesToWordArray(bytes);
     var digest = CryptoJS.SHA256(wa);
-    return k5WordsToBytes(digest.words, digest.sigBytes);
+    return wordsToBytes(digest.words, digest.sigBytes);
   }
 
-  // 移植自 reference/k5j7u_legacy/src/decrypt_media_play.py:
-  // salt=raw[:12], base_key+salt 经 SHA256 编织派生 key(32B)/iv(16B), AES-256-CBC/PKCS7
-  function k5QyDecrypt(b64) {
+  // 移植自 reference/k5j7u_legacy/src/decrypt_media_play.py,并在 ksXVideo
+  // 打包 JS(decodeHttpResponseData)里逐步核对确认是同一套算法:
+  // salt=raw[:12], INTERFACE_KEY+salt 经 SHA256 编织派生 key(32B)/iv(16B),
+  // AES-256-CBC/PKCS7。
+  function qyDecrypt(b64) {
     var C = CryptoJS;
     var raw = C.enc.Base64.parse(b64);
-    var rawBytes = k5WordsToBytes(raw.words, raw.sigBytes);
+    var rawBytes = wordsToBytes(raw.words, raw.sigBytes);
     if (rawBytes.length < 12) throw new Error('payload too short');
 
     var salt = rawBytes.slice(0, 12);
     var cipher = rawBytes.slice(12);
-    var baseKey = k5StrToBytes(K5_INTERFACE_KEY);
+    var baseKey = strToBytes(INTERFACE_KEY);
     var o = baseKey.concat(salt);
     var n = Math.floor(o.length / 2);
 
-    var l = k5Sha256Bytes(o).slice(8, 24);
-    var p = k5Sha256Bytes(l.concat(o.slice(0, n)));
-    var u = k5Sha256Bytes(o.slice(n).concat(l));
+    var l = sha256Bytes(o).slice(8, 24);
+    var p = sha256Bytes(l.concat(o.slice(0, n)));
+    var u = sha256Bytes(o.slice(n).concat(l));
 
     var key = p.slice(0, 8).concat(u.slice(8, 24)).concat(p.slice(24, 32));
     var iv = u.slice(0, 4).concat(p.slice(12, 20)).concat(u.slice(28, 32));
@@ -132,29 +134,90 @@
     if (iv.length !== 16) throw new Error('iv len ' + iv.length);
 
     var decrypted = C.AES.decrypt(
-      { ciphertext: k5BytesToWordArray(cipher) },
-      k5BytesToWordArray(key),
-      { iv: k5BytesToWordArray(iv), mode: C.mode.CBC, padding: C.pad.Pkcs7 }
+      { ciphertext: bytesToWordArray(cipher) },
+      bytesToWordArray(key),
+      { iv: bytesToWordArray(iv), mode: C.mode.CBC, padding: C.pad.Pkcs7 }
     );
     return decrypted.toString(C.enc.Utf8);
   }
 
-  async function k5CallMediaPlay(id) {
-    var token = k5GetToken();
-    var sid = k5GetSid();
-    var ua = k5BuildUA(sid);
-    var sig = k5SignApiKey(token, ua);
-
-    var resp = await fetch(K5_API_BASE + '/media/play', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+  // ==========================================================================
+  // 站点配置:按 hostname 分流。签名/加密算法和 key 两站完全一致,只有请求头
+  // 组装格式、时间戳单位、m3u8 URL 参数不同 —— 差异都封装在这里,activeFetch()
+  // 主流程本身不用关心站点差异。
+  // ==========================================================================
+  var K5_SITE_CONFIG = {
+    id: 'k5j7u',
+    apiBase: '/api/app',
+    tsUnit: 'ms',
+    buildHeaders: function (token, ua, sig) {
+      return {
         'Authorization': token,
         'X-User-Agent': ua,
         'X-Timestamp': sig.ts,
         'X-Nonce': sig.nonce,
         'X-Sign': sig.sign
-      },
+      };
+    },
+    m3u8SignUA: function (ua) { return ua; },
+    buildM3u8Url: function (apiBase, path, token, sig) {
+      var qs =
+        'token=' + encodeURIComponent(token) +
+        '&timestamp=' + sig.ts +
+        '&sign=' + sig.sign +
+        '&nonce=' + sig.nonce +
+        '&c=' + encodeURIComponent(getCdnHost());
+      return apiBase + '/media/h5/m3u8/' + path + '?' + qs;
+    }
+  };
+  var KSXVIDEO_SITE_CONFIG = {
+    id: 'ksxvideo',
+    apiBase: '/api/app',
+    tsUnit: 's',
+    buildHeaders: function (token, ua, sig) {
+      return {
+        'Authorization': token,
+        'X-User-Agent': ua,
+        'x-api-key': 'timestamp=' + sig.ts + ';sign=' + sig.sign + ';nonce=' + sig.nonce
+      };
+    },
+    // ksXVideo 的前端对 m3u8 URL 签名时,XUserAgent 传空字符串(不是完整 UA),
+    // 且不带 &c= CDN 参数 —— 这是从其打包 JS 的 encode_play_url 里核对到的,
+    // 不是随意约定,改动这里会导致签名对不上。
+    m3u8SignUA: function () { return ''; },
+    buildM3u8Url: function (apiBase, path, token, sig) {
+      var qs =
+        'token=' + encodeURIComponent(token) +
+        '&timestamp=' + sig.ts +
+        '&sign=' + sig.sign +
+        '&nonce=' + sig.nonce;
+      return apiBase + '/media/h5/m3u8/' + path + '?' + qs;
+    }
+  };
+  var SITE_CONFIGS = {
+    'dsq3p4z6gl5ag.cloudfront.net': K5_SITE_CONFIG,
+    'k5j7u.com': K5_SITE_CONFIG,
+    'd270v74snrdyr6.cloudfront.net': KSXVIDEO_SITE_CONFIG
+  };
+
+  function getSiteConfig() {
+    return SITE_CONFIGS[location.hostname] || null;
+  }
+
+  // 主动请求方案:直接调 /media/play 拿完整片源,不依赖、不等待站点自己的
+  // 原生播放请求,随时点书签都行,跟 k5 原始方案的使用体验完全一致。
+  async function activeFetch(cfg, id) {
+    await loadScript(CRYPTO_JS_SRC, 'CryptoJS');
+    var token = getToken();
+    var ua = buildUA(getSid());
+    var mediaPlayPath = cfg.apiBase + '/media/play';
+    var sig = computeSign(cfg, token, mediaPlayPath, ua);
+    var headers = cfg.buildHeaders(token, ua, sig);
+    headers['Content-Type'] = 'application/json';
+
+    var resp = await fetch(mediaPlayPath, {
+      method: 'POST',
+      headers: headers,
       body: JSON.stringify({ id: Number(id) })
     });
     if (!resp.ok) throw new Error('media/play HTTP ' + resp.status);
@@ -162,37 +225,24 @@
     if (!j || typeof j.data !== 'string') {
       throw new Error('media/play 响应异常: ' + JSON.stringify(j).slice(0, 200));
     }
-    var plain = k5QyDecrypt(j.data);
+    var plain = qyDecrypt(j.data);
     var outer = JSON.parse(plain);
     var info = outer.mediaInfo || outer;
     log('mediaInfo code=' + (outer.code != null ? outer.code : info.code) + ' videoUrl=' + (info.videoUrl || '').slice(0, 60));
     if (!info.videoUrl) throw new Error('mediaInfo.videoUrl 为空: ' + plain.slice(0, 200));
-    return { info: info, token: token, ua: ua };
-  }
 
-  function k5BuildFullM3u8Url(videoUrl, token, ua) {
-    var sig = k5SignApiKey(token, ua);
-    var cdn = k5GetCdnHost();
-    var path = videoUrl.replace(/^\/+/, '');
-    var qs =
-      'token=' + encodeURIComponent(token) +
-      '&timestamp=' + sig.ts +
-      '&sign=' + sig.sign +
-      '&nonce=' + sig.nonce +
-      '&c=' + encodeURIComponent(cdn);
-    return K5_API_BASE + '/media/h5/m3u8/' + path + '?' + qs;
-  }
+    var path = info.videoUrl.replace(/^\/+/, '');
+    var m3u8Path = cfg.apiBase + '/media/h5/m3u8/' + path;
+    var m3u8Ua = cfg.m3u8SignUA(ua);
+    var sig2 = computeSign(cfg, token, m3u8Path, m3u8Ua);
+    var fullUrl = cfg.buildM3u8Url(cfg.apiBase, path, token, sig2);
 
-  // k5 专属:主动请求方案入口(仅在网络拦截超时未命中时调用)
-  async function k5ActiveFetch(id) {
-    await loadScript(CRYPTO_JS_SRC, 'CryptoJS');
-    var mp = await k5CallMediaPlay(id);
-    var fullUrl = k5BuildFullM3u8Url(mp.info.videoUrl, mp.token, mp.ua);
-    return { title: mp.info.title || '', videoUrl: mp.info.videoUrl, fullUrl: fullUrl };
+    return { title: info.title || '', videoUrl: info.videoUrl, fullUrl: fullUrl };
   }
 
   // ==========================================================================
-  // 通用:广告/弹窗遮罩清理(所有站点共用一套选择器,持续清理)
+  // 通用:广告/弹窗遮罩清理(所有站点共用一套选择器,持续清理;跟"拿 m3u8"
+  // 的机制无关,单纯是为了能正常点击到页面元素)
   // ==========================================================================
   var AD_SELECTORS = ['.van-overlay', '.van-popup', '.tipBox', '.vue-nice-modal-root'];
 
@@ -211,93 +261,6 @@
       mo.observe(document.body, { childList: true, subtree: true });
       return mo;
     } catch (e) { return null; }
-  }
-
-  // ==========================================================================
-  // 通用:截断后缀去除
-  // 已知案例(ksXVideo):部分视频原生请求的 m3u8 文件名(不是 query 参数)带
-  // `_0001` 这种数字后缀,只返回中段 2 个分片(阉割预览)。把文件名里这个后缀
-  // 去掉、访问同名不带后缀的 m3u8,能拿到从 0 号分片开始的完整分片列表。
-  // 只处理 query string 之前的 path 部分,token/sign 等签名参数不受影响
-  // (站点签名只覆盖 query string,不校验 path 文件名)。
-  // ==========================================================================
-  var TRUNCATE_SUFFIX_RE = /_0\d*(\.m3u8)(\?|$)/i;
-
-  function stripTruncationSuffix(url) {
-    if (typeof url !== 'string') return url;
-    return url.replace(TRUNCATE_SUFFIX_RE, '$1$2');
-  }
-
-  // ==========================================================================
-  // 通用:网络拦截模块
-  // 给 XHR/fetch 打补丁,监听任意 .m3u8 请求;命中截断后缀就在发出前改写 URL
-  // 再放行(这样站点自己的原生播放器也会自动拿到修正后的完整流),同时把当前
-  // 捕获到的(已改写)URL 通过可替换的回调上报给上层逻辑。
-  //
-  // 注意:monkey-patch 本身只安装一次(整页生命周期内幂等),但“当前监听者”
-  // 通过 window.__vg_hook_listener__ 这个可替换引用来实现——这样同一次页面
-  // 会话里多次点书签(比如连续切换视频)时,每次 waitForHook() 都能拿到新的
-  // 一次性回调,而不会被第一次安装时的旧闭包卡住。
-  // ==========================================================================
-  function installNetworkHook() {
-    if (window.__vg_hook_installed__) return;
-    window.__vg_hook_installed__ = true;
-
-    var origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url) {
-      var args = Array.prototype.slice.call(arguments);
-      if (typeof url === 'string' && url.indexOf('.m3u8') !== -1) {
-        var fixed = stripTruncationSuffix(url);
-        if (fixed !== url) log('拦截到截断后缀,已改写: ' + url + ' -> ' + fixed);
-        args[1] = fixed;
-        if (window.__vg_hook_listener__) {
-          try { window.__vg_hook_listener__(fixed); } catch (e) {}
-        }
-      }
-      return origOpen.apply(this, args);
-    };
-
-    var origFetch = window.fetch;
-    if (origFetch) {
-      window.fetch = function (input, init) {
-        var args = Array.prototype.slice.call(arguments);
-        var u = (typeof input === 'string') ? input : (input && input.url);
-        if (typeof u === 'string' && u.indexOf('.m3u8') !== -1) {
-          var fixed = stripTruncationSuffix(u);
-          if (fixed !== u) {
-            log('拦截到截断后缀,已改写: ' + u + ' -> ' + fixed);
-            args[0] = (typeof input === 'string') ? fixed : new Request(fixed, init);
-          }
-          if (window.__vg_hook_listener__) {
-            try { window.__vg_hook_listener__(fixed); } catch (e) {}
-          }
-        }
-        return origFetch.apply(this, args);
-      };
-    }
-  }
-
-  // 等待网络拦截命中一次 m3u8 请求。timeoutMs 为 null/undefined 表示不设超时,
-  // 一直等到命中为止(用于没有 fallback 的站点)。
-  function waitForHook(timeoutMs) {
-    installNetworkHook();
-    return new Promise(function (resolve) {
-      var settled = false;
-      window.__vg_hook_listener__ = function (url) {
-        if (settled) return;
-        settled = true;
-        window.__vg_hook_listener__ = null;
-        resolve(url);
-      };
-      if (timeoutMs != null) {
-        setTimeout(function () {
-          if (settled) return;
-          settled = true;
-          window.__vg_hook_listener__ = null;
-          resolve(null);
-        }, timeoutMs);
-      }
-    });
   }
 
   // ==========================================================================
@@ -325,27 +288,6 @@
       if (!rec || !rec.fullUrl) return null;
       return rec;
     } catch (e) { return null; }
-  }
-
-  // ==========================================================================
-  // 通用:等待提示(纯拦截、无 fallback 的站点在等待命中期间显示,不打断操作)
-  // ==========================================================================
-  var WAIT_HINT_ID = '__vg_wait_hint__';
-
-  function showWaitHint(text) {
-    var el = document.getElementById(WAIT_HINT_ID);
-    if (!el) {
-      el = document.createElement('div');
-      el.id = WAIT_HINT_ID;
-      el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;background:rgba(0,0,0,0.75);color:#fff;padding:8px 16px;border-radius:20px;font:13px/1.4 -apple-system,sans-serif;pointer-events:none;';
-      document.body.appendChild(el);
-    }
-    el.textContent = text;
-  }
-
-  function hideWaitHint() {
-    var el = document.getElementById(WAIT_HINT_ID);
-    if (el) el.remove();
   }
 
   // ==========================================================================
@@ -546,85 +488,34 @@
   }
 
   // ==========================================================================
-  // 站点配置:按 hostname 分流。只有 k5 需要 fallback(主动伪造请求),
-  // 其余站点(ksXVideo、未来新站)默认走纯拦截,不需要任何专属签名 key。
-  // ==========================================================================
-  var K5_SITE_CONFIG = {
-    id: 'k5j7u',
-    fallback: {
-      timeoutMs: 2000,
-      fetch: k5ActiveFetch
-    }
-  };
-  var DEFAULT_SITE_CONFIG = {
-    id: 'generic',
-    fallback: null
-  };
-  var SITE_CONFIGS = {
-    'dsq3p4z6gl5ag.cloudfront.net': K5_SITE_CONFIG,
-    'k5j7u.com': K5_SITE_CONFIG
-  };
-
-  function getSiteConfig() {
-    return SITE_CONFIGS[location.hostname] || DEFAULT_SITE_CONFIG;
-  }
-
-  // ==========================================================================
-  // 主流程
+  // 主流程:纯主动请求,不依赖/不等待任何网络拦截 —— 跟 k5 原始方案的使用
+  // 体验完全一致,随时点书签都行,没有"必须先触发原生请求"的时机问题。
   // ==========================================================================
   async function resolveRecord() {
     var cfg = getSiteConfig();
     var id = getIdFromUrl();
     var cached = loadCachedRecord();
 
-    if (cfg.fallback) {
-      // 有 fallback 的站点(目前只有 k5):先给网络拦截一个短窗口机会,
-      // 命中就直接用(说明这一站原生也会自己发起完整请求,统一逻辑生效);
-      // 超时未命中再退回主动伪造请求方案。
-      showWaitHint('检测中…');
-      var hookedUrl = await waitForHook(cfg.fallback.timeoutMs);
-      hideWaitHint();
+    if (!cfg) {
+      if (cached) return { rec: cached, note: 'cached(未识别站点)' };
+      throw new Error('当前站点尚未适配(未收录签名 key),且没有缓存可用');
+    }
 
-      if (hookedUrl) {
-        return { rec: saveRecord(id, document.title, hookedUrl), note: 'hooked' };
-      }
-      if (id) {
-        log('拦截超时,回退到主动请求方案(' + cfg.id + ')');
-        try {
-          var got = await cfg.fallback.fetch(id);
-          return { rec: saveRecord(id, got.title, got.fullUrl, got.videoUrl), note: 'fallback' };
-        } catch (e) {
-          log('主动请求方案失败: ' + e.message);
-          if (cached && String(cached.id) === String(id)) {
-            return { rec: cached, note: 'cached(fallback失败)' };
-          }
-          throw e;
+    if (id) {
+      try {
+        var got = await activeFetch(cfg, id);
+        return { rec: saveRecord(id, got.title, got.fullUrl, got.videoUrl), note: 'active' };
+      } catch (e) {
+        log('主动请求失败: ' + e.message);
+        if (cached && String(cached.id) === String(id)) {
+          return { rec: cached, note: 'cached(主动请求失败)' };
         }
+        throw e;
       }
-      if (cached) return { rec: cached, note: 'cached' };
-      throw new Error('拦截超时且当前非详情页,又没有缓存 — 请先进入视频详情页并点击播放');
     }
 
-    // 无 fallback 的站点(ksXVideo 及未来新站):纯拦截。
-    // 只有在“非详情页 + 已有缓存”时才直接复用缓存;否则等站点自己发起
-    // 播放请求(不管是不是详情页,SPA 内的视频信息流一样能拦截到)。
-    // 给一个较宽松的超时(而不是无限等),避免"视频在点书签前就已经自动
-    // 播完加载"导致的请求错过拦截窗口时,脚本静默卡死不报错。
-    if (!id && cached) {
-      return { rec: cached, note: 'cached' };
-    }
-    showWaitHint('等待视频开始播放…');
-    var genericUrl = await waitForHook(DEFAULT_HOOK_TIMEOUT_MS);
-    hideWaitHint();
-    if (!genericUrl) {
-      if (cached) return { rec: cached, note: 'cached(拦截超时)' };
-      throw new Error(
-        DEFAULT_HOOK_TIMEOUT_MS / 1000 + ' 秒内未拦截到播放请求 — ' +
-        '很可能是视频在点书签之前就已经自动播完加载了(拦截错过窗口)。' +
-        '请退出这个视频重新进入一次,或切到下一个视频后再点书签。'
-      );
-    }
-    return { rec: saveRecord(id, document.title, genericUrl), note: 'hooked' };
+    if (cached) return { rec: cached, note: 'cached' };
+    throw new Error('当前非详情页(URL 无 ?id=),且没有缓存 — 请先进入视频详情页');
   }
 
   async function main() {
@@ -635,7 +526,6 @@
       var result = await resolveRecord();
       mount(result.rec, result.note);
     } catch (e) {
-      hideWaitHint();
       console.error('[vg-player]', e);
       alert('[vg-player] ❌ ' + e.message);
     }
