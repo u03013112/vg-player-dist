@@ -253,30 +253,40 @@
       '<title>' + titleSafe + '</title>' +
       '<style>' +
         'html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;}' +
-        '#bar{height:40px;background:#111;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font:13px/1 -apple-system,sans-serif;box-sizing:border-box;}' +
-        '#video{width:100%;height:calc(100% - 40px);background:#000;object-fit:contain;display:block;}' +
-        '#float{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:999;background:rgba(0,0,0,.7);color:#fff;padding:16px 20px;border-radius:12px;display:flex;flex-direction:column;gap:10px;width:82%;max-width:380px;font:14px/1.3 -apple-system,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.6);}' +
+        '#wrap{position:fixed;left:0;top:0;width:100vw;height:100vh;background:#000;display:flex;flex-direction:column;transform-origin:center center;transition:transform .2s;}' +
+        '#bar{height:40px;background:#111;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font:13px/1 -apple-system,sans-serif;box-sizing:border-box;flex-shrink:0;}' +
+        '#bar .btns{display:flex;gap:8px;}' +
+        '#video{flex:1;width:100%;background:#000;object-fit:contain;display:block;}' +
+        '#float{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:999;background:rgba(0,0,0,.7);color:#fff;padding:16px 20px;border-radius:12px;display:flex;flex-direction:column;gap:10px;width:82%;max-width:380px;font:14px/1.3 -apple-system,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.6);}' +
         '#track{position:relative;height:16px;background:#444;border-radius:8px;cursor:pointer;}' +
         '#buf{position:absolute;left:0;top:0;bottom:0;background:#777;border-radius:8px;width:0%;}' +
         '#prog{position:absolute;left:0;top:0;bottom:0;background:#e33;border-radius:8px;width:0%;}' +
         '#knob{position:absolute;top:50%;transform:translate(-50%,-50%);left:0%;width:22px;height:22px;background:#fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,.5);pointer-events:none;}' +
         'button{border:0;border-radius:6px;color:#fff;padding:8px 12px;font-size:13px;}' +
       '</style></head><body>' +
-      '<div id="bar"><span id="status">加载中...</span><button id="closeBtn" style="background:#e33;padding:6px 14px;">× 关闭</button></div>' +
-      '<video id="video" autoplay playsinline></video>' +
-      '<div id="float">' +
-        '<div id="track"><div id="buf"></div><div id="prog"></div><div id="knob"></div></div>' +
-        '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
-          '<button id="pp" style="background:#2a7;font-size:16px;">▶︎/❚❚</button>' +
-          '<span id="t" style="font-variant-numeric:tabular-nums;">0:00 / 0:00</span>' +
-          '<button data-d="-10" class="seek" style="background:#333;">−10s</button>' +
-          '<button data-d="10" class="seek" style="background:#333;">+10s</button>' +
+      '<div id="wrap">' +
+        '<div id="bar"><span id="status">加载中...</span><div class="btns">' +
+          '<button id="rotateBtn" style="background:#37a;">⟳ 旋转</button>' +
+          '<button id="fsBtn" style="background:#555;">⛶ 全屏</button>' +
+          '<button id="closeBtn" style="background:#e33;">× 关闭</button>' +
+        '</div></div>' +
+        '<video id="video" autoplay playsinline></video>' +
+        '<div id="float">' +
+          '<div id="track"><div id="buf"></div><div id="prog"></div><div id="knob"></div></div>' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
+            '<button id="pp" style="background:#2a7;font-size:16px;">▶︎/❚❚</button>' +
+            '<span id="t" style="font-variant-numeric:tabular-nums;">0:00 / 0:00</span>' +
+            '<button data-d="-10" class="seek" style="background:#333;">−10s</button>' +
+            '<button data-d="10" class="seek" style="background:#333;">+10s</button>' +
+            '<button id="hideBtn" style="background:#555;" title="隐藏(双击视频恢复)">▽</button>' +
+          '</div>' +
         '</div>' +
       '</div>' +
       '<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>' +
       '<script>(function(){' +
         'var fullUrl=' + fullUrlJson + ';' +
         'var titleText=' + titleJson + ';' +
+        'var wrap=document.getElementById("wrap");' +
         'var vid=document.getElementById("video");' +
         'var status=document.getElementById("status");' +
         'var track=document.getElementById("track");' +
@@ -285,13 +295,46 @@
         'var knob=document.getElementById("knob");' +
         'var t=document.getElementById("t");' +
         'var pp=document.getElementById("pp");' +
+        'var floatBox=document.getElementById("float");' +
         'function fmt(s){if(!isFinite(s))return "0:00";s=Math.max(0,s|0);var m=(s/60)|0,ss=s%60;return m+":"+(ss<10?"0":"")+ss;}' +
         'function setStatus(s){status.textContent=s;}' +
         'setStatus(titleText||"loading...");' +
         'document.getElementById("closeBtn").onclick=function(){window.close();};' +
         'pp.onclick=function(){vid.paused?vid.play():vid.pause();};' +
         'document.querySelectorAll(".seek").forEach(function(b){b.onclick=function(){vid.currentTime=Math.max(0,Math.min(vid.duration||0,vid.currentTime+parseFloat(b.dataset.d)));};});' +
-        'function seekFromEvt(e){var r=track.getBoundingClientRect();var cx=e.touches?e.touches[0].clientX:e.clientX;var pct=Math.max(0,Math.min(1,(cx-r.left)/r.width));if(vid.duration)vid.currentTime=pct*vid.duration;}' +
+        'document.getElementById("hideBtn").onclick=function(){floatBox.style.display="none";};' +
+        'vid.addEventListener("dblclick",function(){floatBox.style.display="flex";});' +
+        'var rotated=false;' +
+        'function applyLayout(){' +
+          'var vw=window.innerWidth,vh=window.innerHeight;' +
+          'if(rotated){' +
+            'wrap.style.width=vh+"px";wrap.style.height=vw+"px";' +
+            'wrap.style.left=((vw-vh)/2)+"px";wrap.style.top=((vh-vw)/2)+"px";' +
+            'wrap.style.transform="rotate(90deg)";' +
+          '}else{' +
+            'wrap.style.width="100vw";wrap.style.height="100vh";' +
+            'wrap.style.left="0";wrap.style.top="0";wrap.style.transform="none";' +
+          '}' +
+        '}' +
+        'function autoRotateOnMeta(){' +
+          'var vw=window.innerWidth,vh=window.innerHeight;' +
+          'var screenPortrait=vh>vw;' +
+          'var videoLandscape=vid.videoWidth>vid.videoHeight&&vid.videoWidth>0;' +
+          'if(screenPortrait&&videoLandscape&&!rotated){rotated=true;applyLayout();setStatus("↻ 自动旋转至横屏");}' +
+        '}' +
+        'vid.addEventListener("loadedmetadata",autoRotateOnMeta);' +
+        'window.addEventListener("resize",applyLayout);' +
+        'window.addEventListener("orientationchange",function(){setTimeout(function(){rotated=false;applyLayout();autoRotateOnMeta();},300);});' +
+        'document.getElementById("rotateBtn").onclick=function(){rotated=!rotated;applyLayout();};' +
+        'document.getElementById("fsBtn").onclick=function(){' +
+          'var el=document.documentElement;' +
+          'var req=el.requestFullscreen||el.webkitRequestFullscreen||el.webkitEnterFullscreen;' +
+          'var vreq=vid.webkitEnterFullscreen;' +
+          'if(req){try{req.call(el);return;}catch(e){}}' +
+          'if(vreq){try{vreq.call(vid);return;}catch(e){}}' +
+          'alert("本浏览器不支持容器全屏,已是沉浸式遮罩状态");' +
+        '};' +
+        'function seekFromEvt(e){var r=track.getBoundingClientRect();var cx=e.touches?e.touches[0].clientX:e.clientX;var cy=e.touches?e.touches[0].clientY:e.clientY;var pct;if(rotated){pct=Math.max(0,Math.min(1,(cy-r.top)/r.height));}else{pct=Math.max(0,Math.min(1,(cx-r.left)/r.width));}if(vid.duration)vid.currentTime=pct*vid.duration;}' +
         'var dragging=false;' +
         'track.addEventListener("mousedown",function(e){dragging=true;seekFromEvt(e);e.preventDefault();});' +
         'window.addEventListener("mousemove",function(e){if(dragging)seekFromEvt(e);});' +
