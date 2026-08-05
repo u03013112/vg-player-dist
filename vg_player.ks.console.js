@@ -232,15 +232,24 @@
   // 播放器 UI:渲染到一个独立的新标签页(而不是覆盖在原页面上),彻底隔离原生
   // 播放器(xgplayer 等)、广告 MutationObserver、原站 JS 的任何干扰。
   //
-  // 关键坑:window.open() 必须在"用户手势"仍然有效时调用,一旦中间插了
-  // await(网络请求)再调,浏览器(尤其 Safari)大概率会当成非用户触发的弹窗
-  // 直接拦截。所以 main() 里 window.open() 是第一行、同步执行,拿到一个空白
-  // 窗口引用后,再异步去请求数据、用 document.write() 把内容写进这个已经
-  // 打开好的窗口——弹窗拦截器只检查"打开窗口"这个动作本身是否同步于用户
-  // 手势,不管之后往里写什么内容,所以能绕开。已在 Safari(webkit)内核实测
-  // 验证:window.open 未被拦截,写入的独立播放器正常加载并播放。
+  // 关键坑:window.open() 必须在"用户手势"仍然有效时调用。原来的实现把
+  // window.open 放在 main() 第一行,以为"同步执行"就够了 —— 但书签场景下
+  // 整个脚本本身是 loader 通过 <script src> 异步从 CDN 拉进来的,从用户点击
+  // 书签到脚本执行 main() 中间隔了一次网络请求,手势上下文早就失效了。
+  // Chrome/Safari 对非手势上下文的 window.open 是【静默拦截】(直接返回 null,
+  // 不弹"是否允许弹窗"的提示),所以表现为"点了书签什么都没发生"。
+  // 脚本被浏览器缓存时加载够快、偶尔能赶上手势有效期,这就是"有时能弹出、
+  // 大部分时候不能"的随机现象的来源。
+  //
+  // 正确解法:让【书签 loader】在用户点击的同步上下文里先 window.open,把窗口
+  // 引用挂到 window.__vg_player_win__,脚本这里优先复用它。脚本自己的
+  // window.open 只作为 console 里手动粘贴执行(同步上下文)时的兜底。
   // ==========================================================================
   function openBlankPlayerWindow() {
+    try {
+      var pre = window.__vg_player_win__;
+      if (pre && !pre.closed) return pre;
+    } catch (e) {}
     try { return window.open('', '_blank'); } catch (e) { return null; }
   }
 
@@ -406,9 +415,9 @@
   }
 
   async function main() {
-    // 关键:必须是 main() 里第一行同步执行,不能放在任何 await 之后 —— 一旦
-    // 隔着网络请求再调 window.open,浏览器(尤其 Safari)大概率会当成非用户
-    // 触发的弹窗直接拦截,见 openBlankPlayerWindow 上方的详细说明。
+    // 必须是第一行、不能放在任何 await 之后。注意:书签场景下真正保证不被
+    // 拦截的是 loader 预开的 window.__vg_player_win__,这里的同步只保证
+    // console 手动粘贴场景仍然有效。详见 openBlankPlayerWindow 上方说明。
     var playerWin = openBlankPlayerWindow();
     try {
       startAdCleaner();
