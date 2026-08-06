@@ -7,8 +7,9 @@
   //
   // 原理: 每次执行时调 /api/app/login/guest 拿一个全新的 guest token(带 2-3 次
   // 免费观看额度),用新 token 调 /api/app/media/play 拿到完整 m3u8 路径,下载 m3u8
-  // 内容后把 AES-128 key URI 替换成内联 data URI(用站方 JS 里逆向到的 guest_skey
-  // 静态密钥),最后把修改后的 m3u8 文本传给弹窗里的 hls.js 播放。
+  // 内容后按 #EXT-X-KEY 声明的 URI(enkey 或 newenkey,两个端点返回的 key 不同)
+  // 动态获取 16 字节 AES-128 密钥,内联成 data URI 替换进 m3u8,最后把修改后的
+  // m3u8 文本传给弹窗里的 hls.js 播放。
   //
   // 和 ks 站的区别:
   // - ks 站 videoUrl=10秒预览, preFileName=真实片段(有设计漏洞可拼接绕过)
@@ -16,6 +17,10 @@
   // - OIO 站 ts 有 AES-128 加密, ks 站没有
   // - OIO 站权限在服务端 m3u8 层检查, ks 站在客户端
   // - OIO 站用 guest 刷免费次数绕过, ks 站用 preFileName 拼接绕过
+  //
+  // 实测: payType=2 的视频 media/play 返回 playable=false/code=6032,但服务端
+  // m3u8 端点不强制 —— 照样返回完整可解密列表,所以不按 playable 拦截,交给
+  // m3u8 fetch 做最终裁决。
   // ==========================================================================
 
   var TARGET_HOSTNAME = 'd2cjrt5ibwkdp4.cloudfront.net';
@@ -187,12 +192,13 @@
     if (!j || !j.data) throw new Error('media/play 响应异常: ' + JSON.stringify(j).slice(0, 200));
     var plain = qyDecrypt(j.data);
     var outer = JSON.parse(plain);
+    // 实测: payType=2 的视频 playable=false/code=6032,但服务端 m3u8 端点不强制 ——
+    // 照样返回完整可解密列表。所以不在这里 throw,交给 m3u8 fetch 做最终裁决。
     if (!outer.playable) {
-      throw new Error('不可播放: ' + (outer.msg || 'code ' + outer.code) +
-        (outer.code === 6031 || outer.code === 6032 ? '\n(该视频需要预购卡或付费,guest 免费次数仅对 payType=1 的视频有效)' : ''));
+      log('警告: playable=false code=' + outer.code + ' msg=' + outer.msg + ' (继续尝试)');
     }
     var info = outer.mediaInfo || outer;
-    if (!info.videoUrl) throw new Error('videoUrl 为空');
+    if (!info.videoUrl) throw new Error('videoUrl 为空 (code=' + outer.code + ' ' + outer.msg + ')');
     log('media/play: playable=' + outer.playable + ' msg=' + outer.msg + ' videoUrl=' + info.videoUrl.slice(0, 50));
     return { title: info.title || '', videoUrl: info.videoUrl };
   }
@@ -219,28 +225,34 @@
     return text;
   }
 
-  // 动态获取 AES-128 密钥: GET /api/app/media/newenkey 返回 16 字节原始密钥。
-  // 用 query params 签名(和 m3u8 URL 一致,XUserAgent 传空字符串),不需要 headers。
-  async function fetchKey(token) {
-    var path = API_BASE + '/media/newenkey';
+  // 按 m3u8 里 #EXT-X-KEY 声明的 URI 动态获取 AES-128 密钥。
+  // 实测 enkey 和 newenkey 是两个不同端点,返回的 16 字节 key 也不同 ——
+  // 必须按 m3u8 里写的那个取,不能硬编码。query 签名时空 UA(和 m3u8 URL 一致)。
+  async function fetchKey(token, keyUri) {
+    var path = keyUri.split('?')[0];
     var sig = computeSign(token, path, '');
     var url = path + '?token=' + encodeURIComponent(token) +
       '&timestamp=' + sig.ts + '&sign=' + sig.sign + '&nonce=' + sig.nonce;
 
     var resp = await fetch(url);
-    if (!resp.ok) throw new Error('newenkey HTTP ' + resp.status);
+    if (!resp.ok) throw new Error('AES key HTTP ' + resp.status + ' (' + path + ')');
     var buf = await resp.arrayBuffer();
     var bytes = new Uint8Array(buf);
-    if (bytes.length !== 16) throw new Error('newenkey 返回 ' + bytes.length + ' 字节(期望 16)');
-    log('AES-128 key 获取成功: ' + bytes.length + ' 字节');
+    if (bytes.length !== 16) throw new Error('AES key 返回 ' + bytes.length + ' 字节 from ' + path);
+    log('AES-128 key 获取成功: ' + bytes.length + ' 字节 from ' + path);
     return bytes;
   }
 
-  // 把 m3u8 里的 #EXT-X-KEY URI 替换成内联 data URI(动态获取的 16 字节密钥)。
-  // 这样 hls.js 不需要额外请求 /api/app/media/newenkey,播放窗口也不需要 CryptoJS。
+  // 把 m3u8 里的 #EXT-X-KEY URI 替换成内联 data URI(按 m3u8 声明的端点动态获取的 16 字节密钥)。
+  // 这样 hls.js 不需要额外请求 key 端点,播放窗口也不需要 CryptoJS。
   async function injectKey(m3u8Text, token) {
-    var keyBytes = await fetchKey(token);
-    // Uint8Array → base64
+    var keyMatch = m3u8Text.match(/#EXT-X-KEY:METHOD=AES-128,URI="([^"]*)"/);
+    if (!keyMatch) {
+      log('未找到 #EXT-X-KEY 行(无加密),原样使用');
+      return m3u8Text;
+    }
+    var keyUri = keyMatch[1];
+    var keyBytes = await fetchKey(token, keyUri);
     var keyStr = '';
     for (var i = 0; i < keyBytes.length; i++) keyStr += String.fromCharCode(keyBytes[i]);
     var keyBase64 = btoa(keyStr);
@@ -249,11 +261,7 @@
       /(#EXT-X-KEY:METHOD=AES-128,URI=")[^"]*(")/,
       '$1' + dataUri + '$2'
     );
-    if (replaced === m3u8Text) {
-      log('未找到 #EXT-X-KEY 行(可能无加密),原样使用');
-    } else {
-      log('已替换 AES-128 key URI 为动态获取的密钥 data URI');
-    }
+    log('已替换 AES-128 key URI (' + keyUri + ') → data URI');
     return replaced;
   }
 
@@ -415,10 +423,35 @@
   // 主流程
   // ==========================================================================
 
+  function loadingHtml() {
+    return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1"></head>' +
+      '<body style="margin:0;background:#000;color:#fff;font:16px/1.4 -apple-system,sans-serif;' +
+      'display:flex;align-items:center;justify-content:center;height:100vh">' +
+      '<div style="text-align:center">VG Player OIO<br>' +
+      '<span style="font-size:13px;opacity:.7">加载中…</span></div></body></html>';
+  }
+
+  function errorHtml(msg) {
+    var safe = String(msg || '').replace(/</g, '&lt;');
+    return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1"></head>' +
+      '<body style="margin:0;background:#200;color:#fff;font:14px/1.5 -apple-system,sans-serif;' +
+      'padding:24px;display:flex;align-items:center;justify-content:center;height:100vh;box-sizing:border-box">' +
+      '<div><strong style="color:#f44">VG Player OIO ❌</strong><br><br>' + safe + '<br><br>' +
+      '<button onclick="window.close()" style="background:#444;color:#fff;border:0;' +
+      'padding:10px 20px;border-radius:6px;font-size:14px">关闭</button></div></body></html>';
+  }
+
   async function main() {
     // 必须在第一行(同步上下文),保证 console 手动粘贴场景下弹窗不被拦截。
     // 书签场景下真正保证不被拦截的是 loader 预开的 window.__vg_player_win__。
     var playerWin = openBlankPlayerWindow();
+    // 立即往新标签页写 loading 页,避免在 async 流程中用户看到空白页。
+    if (playerWin) {
+      try { playerWin.document.open(); playerWin.document.write(loadingHtml()); playerWin.document.close(); }
+      catch (e) {}
+    }
     try {
       if (location.hostname !== TARGET_HOSTNAME) {
         throw new Error('当前站点不是 ' + TARGET_HOSTNAME + ' (OIO禁漫)');
@@ -426,11 +459,19 @@
       var id = getIdFromUrl();
       if (!id) throw new Error('URL 无 ?id= — 请先进入视频详情页');
 
-      log('开始处理: id=' + id);
+      // 签名/解密依赖 CryptoJS,站方 JS 不暴露全局 CryptoJS,必须自己加载。
+      log('加载 CryptoJS...');
+      await loadScript(CRYPTO_JS_SRC, 'CryptoJS');
+      log('CryptoJS 就绪, 开始处理: id=' + id);
       var result = await resolveRecord(id);
       mountInNewTab(playerWin, result.title, result.m3u8Text);
     } catch (e) {
-      if (playerWin) { try { playerWin.close(); } catch (e2) {} }
+      // 出错时把错误写进新标签页(Safari 跨 tab close 不可靠,直接写更稳),
+      // 同时在原页面 alert 兜底。
+      if (playerWin) {
+        try { playerWin.document.open(); playerWin.document.write(errorHtml(e.message)); playerWin.document.close(); }
+        catch (e2) { try { playerWin.close(); } catch (e3) {} }
+      }
       console.error('[vg-oio]', e);
       alert('[vg-oio] ❌ ' + e.message);
     }
