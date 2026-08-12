@@ -351,12 +351,39 @@
         'track.addEventListener("touchstart",function(e){dragging=true;seekFromEvt(e);},{passive:true});' +
         'window.addEventListener("touchmove",function(e){if(dragging)seekFromEvt(e);},{passive:true});' +
         'window.addEventListener("touchend",function(){dragging=false;});' +
-        'function tick(){if(vid.duration){var pct=(vid.currentTime/vid.duration)*100;prog.style.width=pct+"%";knob.style.left=pct+"%";if(vid.buffered.length){var bEnd=vid.buffered.end(vid.buffered.length-1);buf.style.width=(bEnd/vid.duration*100)+"%";}}t.textContent=fmt(vid.currentTime)+" / "+fmt(vid.duration);requestAnimationFrame(tick);}' +
+        // lastProgressAt/lastCT: 静默卡死兜底 —— hls.js 内部自愈失败时(不报 fatal,
+        // 但播放头就是不推进)不会触发 ERROR 事件,只能靠 tick() 里主动侧写检测。
+        // retryCount/MAX_RETRY: fatal 错误重试上限,避免同一视频反复重试陷入死循环。
+        'var lastProgressAt=Date.now(),lastCT=0,stallCooldownAt=0,retryCount=0,MAX_RETRY=3;' +
+        'function tick(){' +
+          'if(vid.duration){var pct=(vid.currentTime/vid.duration)*100;prog.style.width=pct+"%";knob.style.left=pct+"%";if(vid.buffered.length){var bEnd=vid.buffered.end(vid.buffered.length-1);buf.style.width=(bEnd/vid.duration*100)+"%";}}' +
+          't.textContent=fmt(vid.currentTime)+" / "+fmt(vid.duration);' +
+          'var now=Date.now();' +
+          'if(!vid.paused&&vid.currentTime===lastCT){' +
+            'if(now-lastProgressAt>8000&&now-stallCooldownAt>8000){' +
+              'setStatus("⚠ 播放卡住,尝试恢复...");' +
+              'try{hls.startLoad(vid.currentTime);}catch(e){}' +
+              'stallCooldownAt=now;' +
+            '}' +
+          '}else{lastCT=vid.currentTime;lastProgressAt=now;}' +
+          'requestAnimationFrame(tick);' +
+        '}' +
         'tick();' +
         'var hls=new Hls({enableWorker:true});' +
         'hls.on(Hls.Events.MANIFEST_PARSED,function(){var lvl=hls.levels[0]&&hls.levels[0].details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration));vid.play().catch(function(e){setStatus("play() "+e.message);});});' +
         'hls.on(Hls.Events.FRAG_LOADED,function(_,d){setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
-        'hls.on(Hls.Events.ERROR,function(_,d){setStatus("ERR "+d.type+"/"+d.details+(d.response?" http="+d.response.code:""));console.log("[vg-player:error]",d);});' +
+        'hls.on(Hls.Events.ERROR,function(_,d){' +
+          'console.log("[vg-player:error]",d);' +
+          'if(!d.fatal)return;' + // 非致命交给上面 tick() 的静默卡死兜底处理
+          'retryCount++;' +
+          'if(retryCount>MAX_RETRY){setStatus("❌ 播放失败(重试"+MAX_RETRY+"次无效): "+d.type+"/"+d.details+" — 请记录此视频链接反馈");return;}' +
+          'setStatus("⚠ "+d.type+"/"+d.details+" 恢复中("+retryCount+"/"+MAX_RETRY+")...");' +
+          'try{' +
+            'if(d.type===Hls.ErrorTypes.NETWORK_ERROR){hls.startLoad();}' +
+            'else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){hls.recoverMediaError();}' +
+            'else{hls.destroy();setStatus("❌ 播放失败(无法恢复): "+d.type+"/"+d.details+" — 请记录此视频链接反馈");}' +
+          '}catch(e){setStatus("❌ 恢复出错: "+e.message);}' +
+        '});' +
         'hls.loadSource(fullUrl);hls.attachMedia(vid);' +
       '})();</script>' +
       '</body></html>';
