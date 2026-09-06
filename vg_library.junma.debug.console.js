@@ -337,7 +337,7 @@
         box.appendChild(ph);
         var img = document.createElement('img');
         img.alt = '';
-        img.loading = 'lazy';
+        // 同正式版:禁止 loading='lazy'(display:none + 异步 src = 永不触发加载且零报错)
         img.style.display = 'none';
         img.onload = function () { img.style.display = 'block'; ph.style.display = 'none'; };
         img.onerror = function () {

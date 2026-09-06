@@ -211,7 +211,10 @@
         box.appendChild(ph);
         var img = document.createElement('img');
         img.alt = '';
-        img.loading = 'lazy';
+        // 注意:绝不能加 loading='lazy' —— src 是异步回调里才赋值的,而 img 此时是
+        // display:none(无布局盒,永不与视口相交),lazy 会永远不触发加载,
+        // 且无任何报错(2026-09-06 真机排障实锤:封面全空但零错误零日志)。
+        // data URI 是内联资源,无网络开销,eager 加载即秒解。
         img.style.display = 'none';
         img.onload = function () { img.style.display = 'block'; ph.style.display = 'none'; };
         box.appendChild(img);
