@@ -140,7 +140,8 @@
     var SECRET = cfg.signSecret;
     var LIST_SIZE = cfg.listSize || 12;
 
-    var state = { items: [], k: '', page: 1, hls: null, retries: 0, rafId: 0, cleanup: [] };
+    var state = { items: [], rendered: 0, k: '', page: 1, loading: false, exhausted: false,
+      savedScroll: 0, hls: null, retries: 0, rafId: 0, cleanup: [] };
 
     // ===================== debug 日志面板(仅 debug 构建) =====================
     var dbgLines = [];
@@ -207,50 +208,74 @@
       return { 'X-Request-Timestamp': ts, 'X-Request-Verify': ver };
     }
 
-    // 与正式版同款统一翻页模型:一切皆搜索(k=''为浏览),搜索=第1页替换,
-    // 上一页/下一页=当前上下文翻页(替换);初始随机页起步(撞空重抽≤3)。
-    function openPage(k, page, randomDraw) {
-      state.k = k;
+    // 与正式版同款无限下拉模型:滚动触底自动取下一页并追加;
+    // 初始随机页起步(撞空重抽≤3);越界置 exhausted;播放器冻结/恢复背景滚动。
+    function fetchPage(k, page, randomDraw) {
+      if (state.loading) return;
+      state.loading = true;
       status('加载中...');
+      setFooter('加载中...');
       var attempt = 0;
-      function go() {
+      function go(p) {
         attempt++;
         var path = '/app/clipdata?code=' + encodeURIComponent(cfg.code || '') +
-          '&p=' + page + '&k=' + encodeURIComponent(k);
-        DBG('list', 'CLIPDATA p=' + page + ' k="' + k + '" randomDraw=' + randomDraw +
-          (attempt > 1 ? ' (重试' + attempt + ')' : ''));
+          '&p=' + p + '&k=' + encodeURIComponent(k);
+        DBG('list', 'CLIPDATA p=' + p + ' k="' + k + '" attempt=' + attempt);
         var t0 = Date.now();
         fetch(API + path, { headers: sig('GET', '/app/clipdata') })
           .then(function (r) { return r.json(); })
           .then(function (j) {
-            if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); DBG('list', '接口异常 ' + (Date.now() - t0) + 'ms: ' + (j && j.msg)); return; }
+            state.loading = false;
+            if (!j || j.code !== 200) {
+              setFooter('加载失败,继续下拉可重试');
+              status('接口异常: ' + (j && j.msg), true);
+              DBG('list', '接口异常 ' + (Date.now() - t0) + 'ms: ' + (j && j.msg));
+              return;
+            }
             var batch = j.data || [];
             if (!batch.length) {
               if (randomDraw && attempt < 3) {
-                page = 1 + Math.floor(Math.random() * 6000);
-                DBG('list', '随机页撞空,重抽 p=' + page);
-                go();
+                var np = 1 + Math.floor(Math.random() * 6000);
+                DBG('list', '随机页撞空,重抽 p=' + np);
+                go(np);
                 return;
               }
-              if (k && page === 1) { state.page = 1; status('搜索"' + k + '" 无匹配结果', true); DBG('list', '无匹配'); return; }
-              status('没有更多了(已是末页)');
-              DBG('list', '末页(不前进)');
+              state.exhausted = true;
+              setFooter(state.items.length ? '— 没有更多了 —' : '');
+              status(state.items.length
+                ? ((k ? '搜索"' + k + '" ' : '') + '没有更多了(共 ' + state.items.length + ' 条)')
+                : (k ? '搜索"' + k + '" 无匹配结果' : '没有内容'), true);
+              DBG('list', 'exhausted · 累计 ' + state.items.length);
               return;
             }
-            state.page = page;
-            state.items = batch;
-            status((k ? '搜索"' + k + '" ' : '') + '第 ' + page + ' 页 · 每页 ' + batch.length + ' 条');
-            DBG('list', 'OK ' + batch.length + ' 条 · ' + (Date.now() - t0) + 'ms');
+            state.page = p;
+            state.items = state.items.concat(batch);
             renderGrid();
-            dimPager();
+            status((k ? '搜索"' + k + '" ' : '') + '已加载 ' + state.items.length + ' 条 · 下拉加载更多');
+            setFooter('继续下拉加载更多');
+            DBG('list', 'OK +' + batch.length + ' · 累计 ' + state.items.length + ' · ' + (Date.now() - t0) + 'ms');
           })
-          .catch(function (e) { status('列表加载失败: ' + e.message, true); DBG('list', '失败 ' + (Date.now() - t0) + 'ms: ' + e.message); });
+          .catch(function (e) {
+            state.loading = false;
+            setFooter('加载失败,继续下拉可重试');
+            status('加载失败: ' + e.message, true);
+            DBG('list', '失败 ' + (Date.now() - t0) + 'ms: ' + e.message);
+          });
       }
-      go();
+      go(page);
     }
-    function dimPager() {
-      var prev = $('#vg-prev-btn');
-      if (prev) prev.classList.toggle('vg-btn-dim', state.page <= 1);
+    function setFooter(txt) {
+      var el = $('#vg-more');
+      if (el) el.textContent = txt;
+    }
+    function resetFeed(k, page, randomDraw) {
+      DBG('list', 'RESET k="' + k + '" page=' + page);
+      state.k = k;
+      state.items = [];
+      state.rendered = 0;
+      state.exhausted = false;
+      $('#vg-grid').innerHTML = '';
+      fetchPage(k, page, randomDraw);
     }
 
     function decodeTitle(b64) {
@@ -353,8 +378,7 @@
 
     function renderGrid() {
       var grid = $('#vg-grid');
-      grid.innerHTML = '';
-      state.items.forEach(function (it) {
+      state.items.slice(state.rendered).forEach(function (it) {
         var card = document.createElement('div');
         card.className = 'vg-card';
 
@@ -396,6 +420,7 @@
           else { ph.textContent = '封面缺失(' + (reason || '?') + ')'; ph.classList.add('vg-ph-err'); }
         });
       });
+      state.rendered = state.items.length;
       runProbes();
     }
 
@@ -426,6 +451,10 @@
       while (state.cleanup.length) { try { state.cleanup.pop()(); } catch (e) {} }
       var ov = $('#vg-player');
       if (ov) ov.parentNode.removeChild(ov);
+      document.body.style.position = '';
+      document.body.style.top = '';
+      document.body.style.width = '';
+      window.scrollTo(0, state.savedScroll || 0);
     }
 
     function openPlayer(item) {
@@ -433,7 +462,11 @@
       if (!dir) { status('无法推导资源目录', true); return; }
       var playUrl = dir + '/index.m3u8';
       state.retries = 0;
+      state.savedScroll = window.scrollY || 0;  // 必须先存:下面防御性 closePlayer 会恢复滚动位
       closePlayer();
+      document.body.style.position = 'fixed';
+      document.body.style.top = (-state.savedScroll) + 'px';
+      document.body.style.width = '100%';
 
       var ov = document.createElement('div');
       ov.id = 'vg-player';
@@ -624,21 +657,22 @@
     // 静态骨架 + 事件绑定
     // ------------------------------------------------------------------
     $('#vg-search-btn').addEventListener('click', function () {
-      openPage($('#vg-search-input').value.trim(), 1, false);
+      resetFeed($('#vg-search-input').value.trim(), 1, false);
     });
     $('#vg-search-input').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') openPage(this.value.trim(), 1, false);
+      if (e.key === 'Enter') resetFeed(this.value.trim(), 1, false);
     });
-    $('#vg-prev-btn').addEventListener('click', function () {
-      if (state.page <= 1) { status('已经是第一页'); return; }
-      openPage(state.k, state.page - 1, false);
-    });
-    $('#vg-next-btn').addEventListener('click', function () {
-      openPage(state.k, state.page + 1, false);
+    window.addEventListener('scroll', function () {
+      if (state.loading || state.exhausted) return;
+      if (window.innerHeight + window.scrollY >=
+          document.documentElement.scrollHeight - 800) {
+        DBG('scroll', '触底,取第 ' + (state.page + 1) + ' 页');
+        fetchPage(state.k, state.page + 1, false);
+      }
     });
     DBGbindPanel();
     DBG('env', 'appMain 启动 · API=' + API + ' · code=' + cfg.code + ' · userKey=' + (cfg.userKey || '(空)'));
-    openPage('', 1 + Math.floor(Math.random() * 6000), true);
+    resetFeed('', 1 + Math.floor(Math.random() * 6000), true);
   }
 
   // ==========================================================================
@@ -655,15 +689,14 @@
       '<div class="vg-app">' +
       '  <div class="vg-head">' +
       '    <div class="vg-brand">VG Library <span class="vg-sub">junma 技术验证原型</span></div>' +
-      '    <div class="vg-search">' +
-      '      <input id="vg-search-input" type="text" placeholder="搜索关键字">' +
-      '      <div id="vg-search-btn" class="vg-btn">搜索</div>' +
-      '      <div id="vg-prev-btn" class="vg-btn vg-btn-ghost">上一页</div>' +
-      '      <div id="vg-next-btn" class="vg-btn vg-btn-ghost">下一页</div>' +
-      '    </div>' +
+      '  </div>' +
+      '  <div class="vg-searchbar">' +
+      '    <input id="vg-search-input" type="text" placeholder="搜索关键字">' +
+      '    <div id="vg-search-btn" class="vg-btn">搜索</div>' +
       '  </div>' +
       '  <div id="vg-status" class="vg-status">初始化...</div>' +
       '  <div id="vg-grid" class="vg-grid"></div>' +
+      '  <div id="vg-more" class="vg-more"></div>' +
       '</div>' +
       '<div id="vg-dbg">' +
       '  <div class="vg-dbg-bar"><span>VG Debug(仅排障构建)</span>' +
@@ -684,10 +717,12 @@
     '*{margin:0;padding:0;box-sizing:border-box}' +
     'body{background:#0f1115;color:#e8eaf0;font-family:-apple-system,"PingFang SC","Segoe UI",Roboto,sans-serif}' +
     '.vg-app{max-width:860px;margin:0 auto;padding:16px 14px 40px}' +
-    '.vg-head{display:flex;flex-direction:column;gap:10px;margin-bottom:10px}' +
+    '.vg-head{margin-bottom:8px}' +
     '.vg-brand{font-size:18px;font-weight:700;letter-spacing:.5px}' +
     '.vg-sub{font-size:11px;font-weight:400;color:#8b93a7;margin-left:6px}' +
-    '.vg-search{display:flex;gap:8px}' +
+    '.vg-searchbar{position:sticky;top:0;z-index:10;background:#0f1115;' +
+    'margin:0 -14px 10px;padding:10px 14px;display:flex;gap:8px;box-shadow:0 3px 10px rgba(0,0,0,.35)}' +
+    '.vg-more{text-align:center;color:#5a6070;font-size:12px;padding:14px 0 6px}' +
     '.vg-search input{flex:1;background:#1a1d24;border:1px solid #2a2f3a;border-radius:8px;' +
     'color:#e8eaf0;padding:9px 12px;font-size:14px;outline:none}' +
     '.vg-search input:focus{border-color:#4f8cff}' +
@@ -695,7 +730,6 @@
     'cursor:pointer;user-select:none;white-space:nowrap}' +
     '.vg-btn:active{opacity:.8}' +
     '.vg-btn-ghost{background:transparent;border:1px solid #2a2f3a;color:#8b93a7}' +
-    '.vg-btn-dim{opacity:.4;pointer-events:none}' +
     '.vg-status{font-size:12px;color:#8b93a7;margin:2px 0 12px;min-height:16px}' +
     '.vg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}' +
     '.vg-card{cursor:pointer}' +
