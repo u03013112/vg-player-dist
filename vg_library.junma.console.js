@@ -130,8 +130,8 @@
     var SECRET = cfg.signSecret;
     var LIST_SIZE = cfg.listSize || 12;
 
-    var state = { items: [], rendered: 0, k: '', page: 1, loading: false, exhausted: false,
-      savedScroll: 0, hls: null, retries: 0, rafId: 0, cleanup: [] };
+    var state = { items: [], k: '', page: 1, abort: null, pageTimer: 0, savedScroll: 0,
+      hls: null, retries: 0, rafId: 0, cleanup: [] };
 
     function $(sel) { return document.querySelector(sel); }
     function status(msg, isErr) {
@@ -146,65 +146,57 @@
       return { 'X-Request-Timestamp': ts, 'X-Request-Verify': ver };
     }
 
-    // 统一"无限下拉"模型(2026-09-06 定版):一切皆搜索,浏览 = 无关键词搜索(k='')。
-    // /app/clipdata?p=<1-based页码>&k=<关键词>,offset=(p-1)*8,每页 8 条;
-    // 滚动到距底部 800px 内自动取下一页并追加;初始随机页起步(撞空重抽≤3);
-    // 越界置 exhausted,页脚提示"没有更多了"。播放器打开时冻结背景滚动,
-    // 关闭后恢复原滚动位置(继续浏览不丢位置)。
-    function fetchPage(k, page, randomDraw) {
-      if (state.loading) return;
-      state.loading = true;
-      status('加载中...');
-      setFooter('加载中...');
+    // 显式翻页模型(2026-09-06 二次定版,替代无限下拉):
+    // /app/clipdata?p=<1-based页码>&k=<关键词>,offset=(p-1)*8,每页 8 条。
+    // 关键语义(用户定版):任何新请求(下一页/上一页/搜索)都会 ABORT 在途请求——
+    // 部分 p 值会挂起不响应,不等超时,直接点下一页跳过;20s 软超时兜底翻提示。
+    // 失败时保留上一批卡片可看,新页成功才替换网格。开屏随机页撞空重抽≤3。
+    function openPage(k, page, randomDraw) {
+      if (state.pageTimer) { clearTimeout(state.pageTimer); }
+      if (state.abort) { try { state.abort.abort(); } catch (e) {} }
+      var ctrl = ('AbortController' in window) ? new window.AbortController() : null;
+      state.abort = ctrl;
+      state.k = k;
+      state.page = page;
+      status((k ? '搜索"' + k + '" ' : '') + '第 ' + page + ' 页 加载中...');
+      var settled = false;
+      state.pageTimer = setTimeout(function () {
+        if (settled || state.abort !== ctrl) return;
+        try { ctrl.abort(); } catch (e) {}
+        status((k ? '搜索"' + k + '" ' : '') + '第 ' + page + ' 页 加载超时 · 点[下一页]跳过', true);
+      }, 20000);
       var attempt = 0;
       function go(p) {
         attempt++;
         var path = '/app/clipdata?code=' + encodeURIComponent(cfg.code || '') +
           '&p=' + p + '&k=' + encodeURIComponent(k);
-        fetch(API + path, { headers: sig('GET', '/app/clipdata') })
+        fetch(API + path, { headers: sig('GET', '/app/clipdata'), signal: ctrl ? ctrl.signal : undefined })
           .then(function (r) { return r.json(); })
           .then(function (j) {
-            state.loading = false;
-            if (!j || j.code !== 200) {
-              setFooter('加载失败,继续下拉可重试');
-              status('接口异常: ' + (j && j.msg), true);
-              return;
-            }
+            if (settled || state.abort !== ctrl) return;
             var batch = j.data || [];
+            if (!batch.length && randomDraw && attempt < 3) { go(1 + Math.floor(Math.random() * 6000)); return; }
+            settled = true;
+            clearTimeout(state.pageTimer);
+            if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); return; }
             if (!batch.length) {
-              if (randomDraw && attempt < 3) { go(1 + Math.floor(Math.random() * 6000)); return; }
-              state.exhausted = true;
-              setFooter(state.items.length ? '— 没有更多了 —' : '');
-              status(state.items.length
-                ? ((k ? '搜索"' + k + '" ' : '') + '没有更多了(共 ' + state.items.length + ' 条)')
-                : (k ? '搜索"' + k + '" 无匹配结果' : '没有内容'), true);
+              status((k ? '搜索"' + k + '" ' : '') + '第 ' + p + ' 页 无内容 · 可[下一页]继续或[上一页]返回');
               return;
             }
             state.page = p;
-            state.items = state.items.concat(batch);
+            state.items = batch;
             renderGrid();
-            status((k ? '搜索"' + k + '" ' : '') + '已加载 ' + state.items.length + ' 条 · 下拉加载更多');
-            setFooter('继续下拉加载更多');
+            status((k ? '搜索"' + k + '" ' : '') + '第 ' + p + ' 页 · ' + batch.length + ' 条');
           })
           .catch(function (e) {
-            state.loading = false;
-            setFooter('加载失败,继续下拉可重试');
-            status('加载失败: ' + e.message, true);
+            if (settled || state.abort !== ctrl) return;
+            if (e && e.name === 'AbortError') { settled = true; clearTimeout(state.pageTimer); return; }
+            settled = true;
+            clearTimeout(state.pageTimer);
+            status((k ? '搜索"' + k + '" ' : '') + '第 ' + p + ' 页 加载失败 · 点[下一页]跳过', true);
           });
       }
       go(page);
-    }
-    function setFooter(txt) {
-      var el = $('#vg-more');
-      if (el) el.textContent = txt;
-    }
-    function resetFeed(k, page, randomDraw) {
-      state.k = k;
-      state.items = [];
-      state.rendered = 0;
-      state.exhausted = false;
-      $('#vg-grid').innerHTML = '';
-      fetchPage(k, page, randomDraw);
     }
 
     function decodeTitle(b64) {
@@ -246,7 +238,8 @@
 
     function renderGrid() {
       var grid = $('#vg-grid');
-      state.items.slice(state.rendered).forEach(function (it) {
+      grid.innerHTML = '';
+      state.items.forEach(function (it) {
         var card = document.createElement('div');
         card.className = 'vg-card';
 
@@ -285,7 +278,6 @@
           else { ph.textContent = '封面缺失(' + (reason || '?') + ')'; ph.classList.add('vg-ph-err'); }
         });
       });
-      state.rendered = state.items.length;
     }
 
     // 封面 URL → CDN 目录(绝对地址)。thumb 形如
@@ -521,19 +513,20 @@
     // 静态骨架 + 事件绑定
     // ------------------------------------------------------------------
     $('#vg-search-btn').addEventListener('click', function () {
-      resetFeed($('#vg-search-input').value.trim(), 1, false);
+      $('#vg-grid').innerHTML = '';
+      openPage($('#vg-search-input').value.trim(), 1, false);
     });
     $('#vg-search-input').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') resetFeed(this.value.trim(), 1, false);
+      if (e.key === 'Enter') { $('#vg-grid').innerHTML = ''; openPage(this.value.trim(), 1, false); }
     });
-    window.addEventListener('scroll', function () {
-      if (state.loading || state.exhausted) return;
-      if (window.innerHeight + window.scrollY >=
-          document.documentElement.scrollHeight - 800) {
-        fetchPage(state.k, state.page + 1, false);
-      }
+    $('#vg-next-btn').addEventListener('click', function () {
+      openPage(state.k, state.page + 1, false);
     });
-    resetFeed('', 1 + Math.floor(Math.random() * 6000), true);
+    $('#vg-prev-btn').addEventListener('click', function () {
+      if (state.page <= 1) { status('已经是第一页'); return; }
+      openPage(state.k, state.page - 1, false);
+    });
+    openPage('', 1 + Math.floor(Math.random() * 6000), true);
   }
 
   // ==========================================================================
@@ -554,10 +547,11 @@
       '  <div class="vg-searchbar">' +
       '    <input id="vg-search-input" type="text" placeholder="搜索关键字">' +
       '    <div id="vg-search-btn" class="vg-btn">搜索</div>' +
+      '    <div id="vg-next-btn" class="vg-btn vg-btn-sm">下一页</div>' +
+      '    <div id="vg-prev-btn" class="vg-btn vg-btn-ghost vg-btn-sm">上一页</div>' +
       '  </div>' +
       '  <div id="vg-status" class="vg-status">初始化...</div>' +
       '  <div id="vg-grid" class="vg-grid"></div>' +
-      '  <div id="vg-more" class="vg-more"></div>' +
       '</div>' +
       '<script src="' + CRYPTO_JS_SRC + '"><\/script>' +
       '<script src="' + HLS_JS_SRC + '"><\/script>' +
@@ -575,7 +569,7 @@
     '.vg-sub{font-size:11px;font-weight:400;color:#8b93a7;margin-left:6px}' +
     '.vg-searchbar{position:sticky;top:0;z-index:10;background:#0f1115;' +
     'margin:0 -14px 10px;padding:10px 14px;display:flex;gap:8px;box-shadow:0 3px 10px rgba(0,0,0,.35)}' +
-    '.vg-more{text-align:center;color:#5a6070;font-size:12px;padding:14px 0 6px}' +
+    '.vg-btn-sm{padding:9px 10px;font-size:13px;flex-shrink:0}' +
     '.vg-search input{flex:1;background:#1a1d24;border:1px solid #2a2f3a;border-radius:8px;' +
     'color:#e8eaf0;padding:9px 12px;font-size:14px;outline:none}' +
     '.vg-search input:focus{border-color:#4f8cff}' +
