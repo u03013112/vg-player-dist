@@ -22,7 +22,7 @@
  *   列表   GET /app/clipdata?code=<agentCode>&p=<1-based页码>&k=<关键词>
  *          → data[{uuid, price, tags, thumb, title(base64)}] 每页 8 条;
  *          offset=(p-1)*8,p<=1 均为第 1 页;片库总量约 4.8万~5.6万条。
- *          原站首页/换一批/搜索全走此接口;getMoreList 非原站通道,弃用
+ *          原站首页/翻页/搜索全走此接口(开屏随机页);getMoreList 非原站通道,弃用
  *   封面   thumb 指向 CDN <目录>/1.txt(内容 = 倒序的 jpeg base64,站点模块 94466 的解码即
  *          endsWith('/j9/') 则整串 reverse),KEY1/KEY2 签名参数实际不校验
  *   播放   <目录>/index.m3u8(master) → hls/index.m3u8(完整 media,#EXT-X-ENDLIST)
@@ -140,7 +140,7 @@
     var SECRET = cfg.signSecret;
     var LIST_SIZE = cfg.listSize || 12;
 
-    var state = { items: [], rendered: 0, k: '', page: 1, hls: null, retries: 0, rafId: 0, cleanup: [] };
+    var state = { items: [], k: '', page: 1, hls: null, retries: 0, rafId: 0, cleanup: [] };
 
     // ===================== debug 日志面板(仅 debug 构建) =====================
     var dbgLines = [];
@@ -207,56 +207,50 @@
       return { 'X-Request-Timestamp': ts, 'X-Request-Verify': ver };
     }
 
-    // 与正式版同款语义:搜索=新搜索(第1页替换);搜索下[换一批]=下一页(追加);
-    // 浏览=随机页(1..6000,撞空重抽≤3);末页回退并提示。p=1-based 页码,offset=(p-1)*8。
-    function loadList(title, opts) {
-      opts = opts || {};
-      var k = (title || '').trim();
-      var append = false;
-      if (k) {
-        if (opts.fresh || k !== state.k) { state.k = k; state.page = 1; }
-        else { state.page += 1; append = true; }
-      } else {
-        state.k = '';
-        state.page = 1;
-      }
-      status(append ? '加载下一页...' : '加载中...');
+    // 与正式版同款统一翻页模型:一切皆搜索(k=''为浏览),搜索=第1页替换,
+    // 上一页/下一页=当前上下文翻页(替换);初始随机页起步(撞空重抽≤3)。
+    function openPage(k, page, randomDraw) {
+      state.k = k;
+      status('加载中...');
       var attempt = 0;
       function go() {
         attempt++;
-        var pSeed = k ? String(state.page) : String(1 + Math.floor(Math.random() * 6000));
         var path = '/app/clipdata?code=' + encodeURIComponent(cfg.code || '') +
-          '&p=' + pSeed + '&k=' + encodeURIComponent(k);
-        DBG('list', 'CLIPDATA p=' + pSeed + ' k="' + k + '" page=' + state.page +
-          ' append=' + append + (attempt > 1 ? ' (重试' + attempt + ')' : ''));
+          '&p=' + page + '&k=' + encodeURIComponent(k);
+        DBG('list', 'CLIPDATA p=' + page + ' k="' + k + '" randomDraw=' + randomDraw +
+          (attempt > 1 ? ' (重试' + attempt + ')' : ''));
         var t0 = Date.now();
         fetch(API + path, { headers: sig('GET', '/app/clipdata') })
           .then(function (r) { return r.json(); })
           .then(function (j) {
             if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); DBG('list', '接口异常 ' + (Date.now() - t0) + 'ms: ' + (j && j.msg)); return; }
             var batch = j.data || [];
-            if (!batch.length && !k && attempt < 3) { DBG('list', 'p=' + pSeed + ' 抽空,重抽'); go(); return; }
-            if (!batch.length && k && state.page > 1) {
-              state.page -= 1;
-              status('搜索"' + k + '"没有更多了(共 ' + state.items.length + ' 条)');
-              DBG('list', '末页回退 → page=' + state.page);
+            if (!batch.length) {
+              if (randomDraw && attempt < 3) {
+                page = 1 + Math.floor(Math.random() * 6000);
+                DBG('list', '随机页撞空,重抽 p=' + page);
+                go();
+                return;
+              }
+              if (k && page === 1) { state.page = 1; status('搜索"' + k + '" 无匹配结果', true); DBG('list', '无匹配'); return; }
+              status('没有更多了(已是末页)');
+              DBG('list', '末页(不前进)');
               return;
             }
-            if (!batch.length && k) { status('搜索"' + k + '" 无匹配结果', true); return; }
-            if (append) state.items = state.items.concat(batch);
-            else state.items = batch;
-            if (k) {
-              status('搜索"' + k + '" 第' + state.page + '页 · 累计 ' + state.items.length +
-                ' 条 · 点[换一批]加载下一页');
-            } else {
-              status('已加载 ' + state.items.length + ' 部 · 点击封面直接播放完整片');
-            }
-            DBG('list', 'OK ' + batch.length + ' 条 · 累计 ' + state.items.length + ' · ' + (Date.now() - t0) + 'ms');
-            renderGrid(append);
+            state.page = page;
+            state.items = batch;
+            status((k ? '搜索"' + k + '" ' : '') + '第 ' + page + ' 页 · 每页 ' + batch.length + ' 条');
+            DBG('list', 'OK ' + batch.length + ' 条 · ' + (Date.now() - t0) + 'ms');
+            renderGrid();
+            dimPager();
           })
           .catch(function (e) { status('列表加载失败: ' + e.message, true); DBG('list', '失败 ' + (Date.now() - t0) + 'ms: ' + e.message); });
       }
       go();
+    }
+    function dimPager() {
+      var prev = $('#vg-prev-btn');
+      if (prev) prev.classList.toggle('vg-btn-dim', state.page <= 1);
     }
 
     function decodeTitle(b64) {
@@ -357,10 +351,10 @@
       }
     }
 
-    function renderGrid(append) {
+    function renderGrid() {
       var grid = $('#vg-grid');
-      if (!append) { grid.innerHTML = ''; state.rendered = 0; }
-      state.items.slice(state.rendered).forEach(function (it) {
+      grid.innerHTML = '';
+      state.items.forEach(function (it) {
         var card = document.createElement('div');
         card.className = 'vg-card';
 
@@ -402,7 +396,6 @@
           else { ph.textContent = '封面缺失(' + (reason || '?') + ')'; ph.classList.add('vg-ph-err'); }
         });
       });
-      state.rendered = state.items.length;
       runProbes();
     }
 
@@ -631,15 +624,21 @@
     // 静态骨架 + 事件绑定
     // ------------------------------------------------------------------
     $('#vg-search-btn').addEventListener('click', function () {
-      loadList($('#vg-search-input').value.trim(), { fresh: true });
+      openPage($('#vg-search-input').value.trim(), 1, false);
     });
     $('#vg-search-input').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') loadList(this.value.trim(), { fresh: true });
+      if (e.key === 'Enter') openPage(this.value.trim(), 1, false);
     });
-    $('#vg-more-btn').addEventListener('click', function () { loadList(state.k); });
+    $('#vg-prev-btn').addEventListener('click', function () {
+      if (state.page <= 1) { status('已经是第一页'); return; }
+      openPage(state.k, state.page - 1, false);
+    });
+    $('#vg-next-btn').addEventListener('click', function () {
+      openPage(state.k, state.page + 1, false);
+    });
     DBGbindPanel();
     DBG('env', 'appMain 启动 · API=' + API + ' · code=' + cfg.code + ' · userKey=' + (cfg.userKey || '(空)'));
-    loadList('');
+    openPage('', 1 + Math.floor(Math.random() * 6000), true);
   }
 
   // ==========================================================================
@@ -659,7 +658,8 @@
       '    <div class="vg-search">' +
       '      <input id="vg-search-input" type="text" placeholder="搜索关键字">' +
       '      <div id="vg-search-btn" class="vg-btn">搜索</div>' +
-      '      <div id="vg-more-btn" class="vg-btn vg-btn-ghost">换一批</div>' +
+      '      <div id="vg-prev-btn" class="vg-btn vg-btn-ghost">上一页</div>' +
+      '      <div id="vg-next-btn" class="vg-btn vg-btn-ghost">下一页</div>' +
       '    </div>' +
       '  </div>' +
       '  <div id="vg-status" class="vg-status">初始化...</div>' +
@@ -695,6 +695,7 @@
     'cursor:pointer;user-select:none;white-space:nowrap}' +
     '.vg-btn:active{opacity:.8}' +
     '.vg-btn-ghost{background:transparent;border:1px solid #2a2f3a;color:#8b93a7}' +
+    '.vg-btn-dim{opacity:.4;pointer-events:none}' +
     '.vg-status{font-size:12px;color:#8b93a7;margin:2px 0 12px;min-height:16px}' +
     '.vg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}' +
     '.vg-card{cursor:pointer}' +
