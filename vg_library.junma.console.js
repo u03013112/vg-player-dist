@@ -9,8 +9,9 @@
  *   签名   X-Request-Verify = MD5("DsVerify_2026_A8x3Qp:<unix秒>:<METHOD>:<规范化path>")
  *          (无请求体加密,比 ks/OIO 的 HmacSHA1+AES-CBC 简单一个量级)
  *   身份   userKey 由 agentCode+IP 派生(getToken),localStorage['userKey']/['code'] 现成可用
- *   列表   POST /app/getMoreList?title=&num=12&code=<agentCode>
- *          → data[{uuid, price, tags, thumb, title(base64)}](一次最多 8 条,"换一批"随机流)
+ *   列表   GET /app/clipdata?code=<agentCode>&p=<随机种子1..5000>&k=<关键词>
+ *          → data[{uuid, price, tags, thumb, title(base64)}] 8 条;p 是确定性种子
+ *          (同 p 同结果,原站首页/换一批/搜索全走此接口;getMoreList 无种子恒同批,弃用)
  *   封面   thumb 指向 CDN <目录>/1.txt(内容 = 倒序的 jpeg base64,站点模块 94466 的解码即
  *          endsWith('/j9/') 则整串 reverse),KEY1/KEY2 签名参数实际不校验
  *   播放   <目录>/index.m3u8(master) → hls/index.m3u8(完整 media,#EXT-X-ENDLIST)
@@ -144,20 +145,30 @@
     }
 
     function loadList(title) {
-      var q = '?title=' + encodeURIComponent(title || '') + '&num=' + LIST_SIZE + '&code=' + encodeURIComponent(cfg.code || '');
+      var k = (title || '').trim();
       status('加载中...');
-      fetch(API + '/app/getMoreList' + q, {
-        method: 'POST',
-        headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, sig('POST', '/app/getMoreList'))
-      })
-        .then(function (r) { return r.json(); })
-        .then(function (j) {
-          if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); return; }
-          state.items = j.data || [];
-          status('已加载 ' + state.items.length + ' 部 · 点击封面直接播放完整片');
-          renderGrid();
-        })
-        .catch(function (e) { status('列表加载失败: ' + e.message, true); });
+      var attempt = 0;
+      function go() {
+        attempt++;
+        // 原站首页/换一批/搜索统一走 /app/clipdata?p=<种子>&k=<关键词>
+        // (抓原站请求流确认,2026-09-06):p 是确定性随机种子,同 p 同结果,
+        // 有效范围约 1..5000(超界返回 0 条),随机撞空时重抽;getMoreList
+        // 是无种子接口,恒返回同一批且 title 参数并非原站搜索通道——已弃用。
+        var path = '/app/clipdata?code=' + encodeURIComponent(cfg.code || '') +
+          '&p=' + (k ? '' : String(1 + Math.floor(Math.random() * 5000))) +
+          '&k=' + encodeURIComponent(k);
+        fetch(API + path, { headers: sig('GET', '/app/clipdata') })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); return; }
+            state.items = j.data || [];
+            if (!state.items.length && !k && attempt < 3) { go(); return; }
+            status('已加载 ' + state.items.length + ' 部 · 点击封面直接播放完整片');
+            renderGrid();
+          })
+          .catch(function (e) { status('列表加载失败: ' + e.message, true); });
+      }
+      go();
     }
 
     function decodeTitle(b64) {
