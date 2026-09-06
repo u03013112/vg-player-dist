@@ -253,10 +253,13 @@
         .then(function (t) {
           if (timer) clearTimeout(timer);
           t = t.trim();
-          if (t.slice(-4) === '/j9/') t = t.split('').reverse().join('');
+          var reversed = false;
+          if (t.slice(-4) === '/j9/') { t = t.split('').reverse().join(''); reversed = true; }
           var uri = 'data:image/jpeg;base64,' + t;
           thumbCache[url] = uri;
-          DBG('thumb', 'OK ' + t.length + 'B · ' + (Date.now() - t0) + 'ms');
+          DBG('thumb', 'OK ' + t.length + 'B · ' + (Date.now() - t0) + 'ms · reversed=' + reversed +
+            ' · head24=' + t.slice(0, 24) + ' · tail16=' + t.slice(-16) +
+            (t.slice(0, 4) === '/9j/' ? '' : ' ⚠非JPEG头(解码必败)'));
           cb(uri);
         })
         .catch(function (e) {
@@ -337,6 +340,12 @@
         img.loading = 'lazy';
         img.style.display = 'none';
         img.onload = function () { img.style.display = 'block'; ph.style.display = 'none'; };
+        img.onerror = function () {
+          ph.textContent = '图片解码失败(dataURI ' + (img.src || '').length + 'B)';
+          ph.classList.add('vg-ph-err');
+          DBG('thumb', '⚠ img解码失败 · dataURI长度=' + (img.src || '').length +
+            ' · 前80=' + String(img.src || '').slice(0, 80));
+        };
         box.appendChild(img);
         if (it.price != null) {
           var price = document.createElement('span');
