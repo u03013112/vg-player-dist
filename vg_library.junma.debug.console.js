@@ -1,5 +1,15 @@
 /*!
- * VG Library — 骏马(2v56) 技术验证原型(不做成产品,仅验证"API 有墙 / CDN 存储层裸奔"绕过路线)
+ * VG Library — 骏马(2v56) 技术验证原型【DEBUG 构建】(不做成产品,仅验证"API 有墙 / CDN 存储层裸奔"绕过路线)
+ *
+ * 与正式版 vg_library.junma.console.js 的差异(仅排障用,功能路径完全一致):
+ *   1. 片库左下角常驻日志面板:全部网络动作(取身份/列表/封面)带时间戳上屏,
+ *      "复制日志"按钮一键回传(clipboard 失败回退 execCommand→prompt)。
+ *   2. 列表渲染后自动跑 5 项连通性探测(取第一条封面 URL):
+ *      ① fetch CORS 模式(正式路径) ② new Image() 无 CORS(等同直接导航)
+ *      ③ XMLHttpRequest(老接口) ④ 同 CDN 故意 404(区分"可达但被拒"vs"挂起")
+ *      ⑤ m3u8 预检(播放路径)。①败②成 = 链路对 XHR 型请求干扰;
+ *      ①②全败 = 到 CDN 的原始连通性断;全超时 = 黑洞(防火墙丢包)。
+ *   3. 封面失败占位文字改亮红色(正式版曾用 #5a6070 深灰,深底上不可见——已回修正式版)。
  *
  * 运行环境:2v56(骏马) 站点任意页面(如 .../client/index.html?suhmal=...&debug=1)。
  * 与 ks/OIO 播放器的差异:本站未付费时点击视频 URL 不变(弹购买框),不存在
@@ -130,6 +140,58 @@
 
     var state = { items: [], hls: null, retries: 0, rafId: 0, cleanup: [] };
 
+    // ===================== debug 日志面板(仅 debug 构建) =====================
+    var dbgLines = [];
+    function DBG(tag, msg) {
+      var d = new Date();
+      var ts = d.toTimeString().slice(0, 8) + '.' + ('00' + (d.getMilliseconds())).slice(-3);
+      var line = ts + ' [' + tag + '] ' + msg;
+      dbgLines.push(line);
+      if (dbgLines.length > 400) dbgLines.shift();
+      var box = document.getElementById('vg-dbg-log');
+      if (box) {
+        var el = document.createElement('div');
+        el.textContent = line;
+        box.appendChild(el);
+        box.scrollTop = box.scrollHeight;
+      }
+      try { console.log('[vg-dbg]', line); } catch (e) {}
+    }
+    function DBGcopyFallback(text, ok) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); ok(); }
+      catch (e) { prompt(' clipboard 不可用,请手动复制:', text); }
+      document.body.removeChild(ta);
+    }
+    function DBGbindPanel() {
+      var copyBtn = document.getElementById('vg-dbg-copy');
+      var clearBtn = document.getElementById('vg-dbg-clear');
+      var toggleBtn = document.getElementById('vg-dbg-toggle');
+      if (toggleBtn) toggleBtn.addEventListener('click', function () {
+        var box = document.getElementById('vg-dbg-log');
+        var open = box.style.display !== 'none';
+        box.style.display = open ? 'none' : 'block';
+        toggleBtn.textContent = open ? '展开 ▸' : '收起 ▾';
+      });
+      if (copyBtn) copyBtn.addEventListener('click', function () {
+        var text = dbgLines.join('\n');
+        function ok() { copyBtn.textContent = '已复制✓'; setTimeout(function () { copyBtn.textContent = '复制日志'; }, 1500); }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(ok, function () { DBGcopyFallback(text, ok); });
+        } else DBGcopyFallback(text, ok);
+      });
+      if (clearBtn) clearBtn.addEventListener('click', function () {
+        dbgLines.length = 0;
+        var box = document.getElementById('vg-dbg-log');
+        if (box) box.innerHTML = '';
+      });
+    }
+
     function $(sel) { return document.querySelector(sel); }
     function status(msg, isErr) {
       var el = $('#vg-status');
@@ -146,18 +208,21 @@
     function loadList(title) {
       var q = '?title=' + encodeURIComponent(title || '') + '&num=' + LIST_SIZE + '&code=' + encodeURIComponent(cfg.code || '');
       status('加载中...');
+      DBG('list', 'GET_MORE_LIST → ' + API + '/app/getMoreList' + q);
+      var t0 = Date.now();
       fetch(API + '/app/getMoreList' + q, {
         method: 'POST',
         headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, sig('POST', '/app/getMoreList'))
       })
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); return; }
+          if (!j || j.code !== 200) { status('接口异常: ' + (j && j.msg), true); DBG('list', '接口异常 ' + (Date.now() - t0) + 'ms: ' + (j && j.msg)); return; }
           state.items = j.data || [];
           status('已加载 ' + state.items.length + ' 部 · 点击封面直接播放完整片');
+          DBG('list', 'OK ' + state.items.length + ' 条 · ' + (Date.now() - t0) + 'ms');
           renderGrid();
         })
-        .catch(function (e) { status('列表加载失败: ' + e.message, true); });
+        .catch(function (e) { status('列表加载失败: ' + e.message, true); DBG('list', '失败 ' + (Date.now() - t0) + 'ms: ' + e.message); });
     }
 
     function decodeTitle(b64) {
@@ -176,6 +241,8 @@
     var thumbCache = {};
     function decodeThumb(url, cb) {
       if (thumbCache[url]) return cb(thumbCache[url]);
+      var t0 = Date.now();
+      DBG('thumb', 'fetch → ' + url);
       var ctrl = ('AbortController' in window) ? new window.AbortController() : null;
       var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
       fetch(url, ctrl ? { signal: ctrl.signal } : {})
@@ -189,12 +256,68 @@
           if (t.slice(-4) === '/j9/') t = t.split('').reverse().join('');
           var uri = 'data:image/jpeg;base64,' + t;
           thumbCache[url] = uri;
+          DBG('thumb', 'OK ' + t.length + 'B · ' + (Date.now() - t0) + 'ms');
           cb(uri);
         })
         .catch(function (e) {
           if (timer) clearTimeout(timer);
-          cb('', (e && e.name === 'AbortError') ? '超时15s' : ((e && e.message) || 'error'));
+          var reason = (e && e.name === 'AbortError') ? '超时15s(请求挂起)' : ((e && e.message) || 'error');
+          DBG('thumb', '失败 · ' + (Date.now() - t0) + 'ms · ' + reason);
+          cb('', reason);
         });
+    }
+
+    // ============ 连通性差分探测(仅 debug 构建;列表渲染后自动跑一次) ============
+    // 结论判读:①败+②成 = 链路只掐 CORS 型请求(放行普通 GET,典型 DPI 特征);
+    //          ①②③全败/全超时 = 到 CDN 的连通性断(黑洞/封禁);
+    //          ④快速失败(任意形式) = CDN 可达且响应明确;④超时 = 黑洞丢包;
+    //          ⑤失败 = 播放路径同样会挂(封面和视频同域同命运)。
+    //          ②用 mode:'no-cors'(成功=连通,内容不可读是预期,opaque response)。
+    var probeDone = false;
+    function probeFetch(name, url, opts) {
+      var t0 = Date.now();
+      var init = opts || {};
+      var ctrl = ('AbortController' in window) ? new window.AbortController() : null;
+      if (ctrl) { init.signal = ctrl.signal; }
+      var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 10000) : null;
+      fetch(url, init)
+        .then(function (r) {
+          if (timer) clearTimeout(timer);
+          DBG('probe', name + ': HTTP ' + r.status + (r.status === 0 ? '(opaque,连通)' : '') + ' · ' + (Date.now() - t0) + 'ms');
+        })
+        .catch(function (e) {
+          if (timer) clearTimeout(timer);
+          var why = (e && e.name === 'AbortError') ? '超时10s(请求挂起=黑洞特征)' : ('失败 ' + ((e && e.message) || ''));
+          DBG('probe', name + ': ' + why + ' · ' + (Date.now() - t0) + 'ms');
+        });
+    }
+    function runProbes() {
+      if (probeDone || !state.items.length) return;
+      probeDone = true;
+      var url = state.items[0].thumb;
+      var dir = dirFromThumb(url);
+      DBG('probe', '===== 连通性探测开始(' + url + ') =====');
+      DBG('env', 'UA: ' + navigator.userAgent);
+      if (navigator.connection) {
+        DBG('env', 'connection: effectiveType=' + navigator.connection.effectiveType +
+          ' rtt=' + navigator.connection.rtt + ' downlink=' + navigator.connection.downlink);
+      }
+      probeFetch('① fetch CORS(正式路径)', url);
+      probeFetch('② fetch no-cors(绕过CORS检查)', url, { mode: 'no-cors' });
+      var t2 = Date.now();
+      try {
+        var x = new XMLHttpRequest();
+        x.open('GET', url, true);
+        x.timeout = 15000;
+        x.onload = function () { DBG('probe', '③ XHR: HTTP ' + x.status + ' · ' + (Date.now() - t2) + 'ms'); };
+        x.onerror = function () { DBG('probe', '③ XHR: 失败 · ' + (Date.now() - t2) + 'ms'); };
+        x.ontimeout = function () { DBG('probe', '③ XHR: 超时15s(请求挂起=黑洞特征)'); };
+        x.send();
+      } catch (e) { DBG('probe', '③ XHR: 异常 ' + e.message); }
+      if (dir) {
+        probeFetch('④ 同CDN故意404(对照:快速失败=可达/超时=黑洞)', dir + '/__vg_probe_404__.txt');
+        probeFetch('⑤ m3u8预检(播放路径)', dir + '/index.m3u8');
+      }
     }
 
     function renderGrid() {
@@ -236,6 +359,7 @@
           else { ph.textContent = '封面缺失(' + (reason || '?') + ')'; ph.classList.add('vg-ph-err'); }
         });
       });
+      runProbes();
     }
 
     // 封面 URL → CDN 目录(绝对地址)。thumb 形如
@@ -469,6 +593,8 @@
       if (e.key === 'Enter') loadList(this.value.trim());
     });
     $('#vg-more-btn').addEventListener('click', function () { loadList(''); });
+    DBGbindPanel();
+    DBG('env', 'appMain 启动 · API=' + API + ' · code=' + cfg.code + ' · userKey=' + (cfg.userKey || '(空)'));
     loadList('');
   }
 
@@ -494,6 +620,14 @@
       '  </div>' +
       '  <div id="vg-status" class="vg-status">初始化...</div>' +
       '  <div id="vg-grid" class="vg-grid"></div>' +
+      '</div>' +
+      '<div id="vg-dbg">' +
+      '  <div class="vg-dbg-bar"><span>VG Debug(仅排障构建)</span>' +
+      '    <span id="vg-dbg-toggle" class="vg-dbg-btn">收起 ▾</span>' +
+      '    <span id="vg-dbg-copy" class="vg-dbg-btn">复制日志</span>' +
+      '    <span id="vg-dbg-clear" class="vg-dbg-btn">清空</span>' +
+      '  </div>' +
+      '  <div id="vg-dbg-log"></div>' +
       '</div>' +
       '<script src="' + CRYPTO_JS_SRC + '"><\/script>' +
       '<script src="' + HLS_JS_SRC + '"><\/script>' +
@@ -526,6 +660,14 @@
     '.vg-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
     'color:#3a404d;font-size:12px;background:linear-gradient(110deg,#1a1d24 8%,#22262f 18%,#1a1d24 33%)}' +
     '.vg-ph-err{color:#ff6b6b;font-size:11px;padding:4px;text-align:center;line-height:1.5}' +
+    '#vg-dbg{position:fixed;left:8px;bottom:8px;width:min(560px,86vw);z-index:2147483000;' +
+    'background:rgba(8,10,14,.94);border:1px solid #2a2f3a;border-radius:8px;overflow:hidden;' +
+    'font:11px/1.5 Menlo,Consolas,monospace}' +
+    '.vg-dbg-bar{display:flex;gap:10px;align-items:center;padding:5px 9px;background:#141821;color:#8b93a7}' +
+    '.vg-dbg-btn{cursor:pointer;color:#4f8cff;border:1px solid #2a2f3a;border-radius:5px;padding:1px 7px;margin-left:auto}' +
+    '.vg-dbg-btn + .vg-dbg-btn{margin-left:0}' +
+    '#vg-dbg-log{max-height:34vh;overflow-y:auto;padding:6px 9px;color:#a8b3c7;' +
+    'white-space:pre-wrap;word-break:break-all}' +
     '.vg-price{position:absolute;top:6px;right:6px;background:rgba(0,0,0,.65);color:#ffd166;' +
     'font-size:11px;padding:2px 7px;border-radius:6px}' +
     '.vg-title{font-size:13px;line-height:1.4;color:#c9cedb;margin-top:7px;height:36px;' +
