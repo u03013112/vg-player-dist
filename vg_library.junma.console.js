@@ -90,9 +90,23 @@
       });
   }
 
+  // agentCode 兜底链:localStorage.code → sessionStorage.localConfig.agentCode → 实例默认值。
+  // 直连实例域时 SPA 可能没把 code 写进 localStorage(入口参数缺失),getToken 不带 code
+  // 只回 {"msg":"操作成功"} 无 data,必须先补上 code。
+  var DEFAULT_AGENT_CODE = '660611';
+
+  function readConfigCode() {
+    try {
+      var raw = window.sessionStorage.getItem('localConfig');
+      if (!raw) return '';
+      var cfg = JSON.parse(raw);
+      return stripQuotes((cfg && cfg.agentCode) || '');
+    } catch (e) { return ''; }
+  }
+
   function resolveIdentity() {
     var apiOrigin = location.origin;
-    var code = readLS('code');
+    var code = readLS('code') || readConfigCode() || DEFAULT_AGENT_CODE;
     var userKey = readLS('userKey');
     var p = userKey ? Promise.resolve(userKey)
       : fetchToken(apiOrigin, code).then(function (uk) {
@@ -100,7 +114,6 @@
           return uk;
         });
     return p.then(function (uk) {
-      if (!code) code = '';
       return { apiOrigin: apiOrigin, code: code, userKey: uk };
     });
   }
@@ -156,20 +169,32 @@
       } catch (e) { return '(标题解码失败)'; }
     }
 
-    // 封面 1.txt:内容是倒序 base64(endsWith('/j9/') 则 reverse),data URI 直接可用
+    // 封面 1.txt:内容是倒序 base64(endsWith('/j9/') 则 reverse),data URI 直接可用。
+    // 失败时把原因(HTTP 状态码/超时/网络拒绝)抛给调用方显示在卡片占位上——
+    // 真机排障用:同一 URL 直连能开但 fetch 失败 = 链路对 XHR 型请求的干扰,
+    // 15 秒超时兜底(fetch 默认无超时,挂起会永远停在占位动画)。
     var thumbCache = {};
     function decodeThumb(url, cb) {
       if (thumbCache[url]) return cb(thumbCache[url]);
-      fetch(url)
-        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+      var ctrl = ('AbortController' in window) ? new window.AbortController() : null;
+      var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
+      fetch(url, ctrl ? { signal: ctrl.signal } : {})
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
         .then(function (t) {
+          if (timer) clearTimeout(timer);
           t = t.trim();
           if (t.slice(-4) === '/j9/') t = t.split('').reverse().join('');
           var uri = 'data:image/jpeg;base64,' + t;
           thumbCache[url] = uri;
           cb(uri);
         })
-        .catch(function () { cb(''); });
+        .catch(function (e) {
+          if (timer) clearTimeout(timer);
+          cb('', (e && e.name === 'AbortError') ? '超时15s' : ((e && e.message) || 'error'));
+        });
     }
 
     function renderGrid() {
@@ -206,9 +231,9 @@
         card.addEventListener('click', function () { openPlayer(it); });
         grid.appendChild(card);
 
-        decodeThumb(it.thumb, function (uri) {
+        decodeThumb(it.thumb, function (uri, reason) {
           if (uri) { img.src = uri; }
-          else { ph.textContent = '封面缺失'; ph.classList.add('vg-ph-err'); }
+          else { ph.textContent = '封面缺失(' + (reason || '?') + ')'; ph.classList.add('vg-ph-err'); }
         });
       });
     }
