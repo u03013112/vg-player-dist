@@ -379,6 +379,7 @@
       '</div>' +
       '<script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.19/dist/hls.min.js"></script>' +
       '<script>(function(){' +
+        'var diagLock=false;' +
         'var m3u8Text=' + m3u8Json + ';' +
         'var realUrl=' + realUrlJson + ';' +
         'var titleText=' + titleJson + ';' +
@@ -466,8 +467,8 @@
         '}' +
         'if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
-          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var lvl=hls.levels[0]&&hls.levels[0].details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration));vid.play().catch(function(){tapToPlay();});});' +
-          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
+          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){tapToPlay();});setTimeout(function(){if(vid.currentTime<0.5){diagLock=true;setStatus("❌ 播放未启动(5s): readyState="+vid.readyState+" codec="+vc+" netState="+vid.networkState+(lvl?(" frags="+lvl.fragments.length+"/"+fmt(lvl.totalduration)):""));console.error("[vg-91p-diag] play-fail codec="+vc+" frags="+(lvl?lvl.fragments.length:"?"));}else{setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+vc);}},5000);});' +
+          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
           'hls.on(Hls.Events.ERROR,function(_,d){' +
             'console.log("[vg-91p:error]",d);' +
             'if(!d.fatal)return;' +
