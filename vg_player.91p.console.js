@@ -281,7 +281,8 @@
           continue;
         }
         API_BASE = hosts[h]; sessionStorage.setItem('vg91p_api', hosts[h]);
-        return text;
+        // 返回真实签名 URL: iOS 原生 HLS 兜底时直接交给系统播放器(不受 MSE/CORS 限制)
+        return { text: text, url: hosts[h] + rel };
       } catch (e) { lastErr = e.message; log('m3u8 主机失败 ' + hosts[h] + ': ' + e.message); }
     }
     throw new Error(lastErr || 'm3u8 全部主机失败');
@@ -323,10 +324,11 @@
     try { return window.open('', '_blank'); } catch (e) { return null; }
   }
 
-  function buildPlayerHtml(title, m3u8Text) {
+  function buildPlayerHtml(title, m3u8Text, m3u8Url) {
     var titleSafe = (title || 'VG Player 91p').replace(/</g, '&lt;');
     var m3u8Json = JSON.stringify(m3u8Text);
     var titleJson = JSON.stringify(title || '');
+    var realUrlJson = JSON.stringify(m3u8Url || '');
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">' +
       '<title>' + titleSafe + '</title>' +
@@ -364,6 +366,7 @@
       '<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>' +
       '<script>(function(){' +
         'var m3u8Text=' + m3u8Json + ';' +
+        'var realUrl=' + realUrlJson + ';' +
         'var titleText=' + titleJson + ';' +
         'var wrap=document.getElementById("wrap");' +
         'var vid=document.getElementById("video");' +
@@ -436,37 +439,59 @@
           'requestAnimationFrame(tick);' +
         '}' +
         'tick();' +
-        'var hls=new Hls({enableWorker:true});' +
-        'hls.on(Hls.Events.MANIFEST_PARSED,function(){var lvl=hls.levels[0]&&hls.levels[0].details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration));vid.play().catch(function(e){setStatus("play() "+e.message);});});' +
-        'hls.on(Hls.Events.FRAG_LOADED,function(_,d){setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
-        'hls.on(Hls.Events.ERROR,function(_,d){' +
-          'console.log("[vg-91p:error]",d);' +
-          'if(!d.fatal)return;' +
-          'retryCount++;' +
-          'if(retryCount>MAX_RETRY){setStatus("❌ 播放失败(重试"+MAX_RETRY+"次无效): "+d.type+"/"+d.details);return;}' +
-          'setStatus("⚠ "+d.type+"/"+d.details+" 恢复中("+retryCount+"/"+MAX_RETRY+")...");' +
-          'try{' +
-            'if(d.type===Hls.ErrorTypes.NETWORK_ERROR){hls.startLoad();}' +
-            'else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){hls.recoverMediaError();}' +
-            'else{hls.destroy();setStatus("❌ 播放失败(无法恢复): "+d.type+"/"+d.details);}' +
-          '}catch(e){setStatus("❌ 恢复出错: "+e.message);}' +
-        '});' +
-        'var blob=new Blob([m3u8Text],{type:"application/vnd.apple.mpegurl"});' +
-        'var blobUrl=URL.createObjectURL(blob);' +
-        'hls.loadSource(blobUrl);' +
-        'hls.attachMedia(vid);' +
+        'function tapToPlay(){setStatus("▶ 点击画面播放");vid.onclick=function(){vid.play().catch(function(e){setStatus("play() "+e.message);});};}' +
+        'var nativeStarted=false;' +
+        'function tryNative(reason){' +
+          'if(nativeStarted||!realUrl)return false;' +
+          'nativeStarted=true;' +
+          'setStatus(titleText+" · 切换系统播放器(原生 HLS)"+(reason?" ["+reason+"]":"")+"...");' +
+          'vid.src=realUrl;' +
+          'vid.addEventListener("loadedmetadata",function(){setStatus(titleText+" · "+fmt(vid.duration));});' +
+          'vid.play().catch(function(){tapToPlay();});' +
+          'return true;' +
+        '}' +
+        'if(window.Hls&&Hls.isSupported()){' +
+          'var hls=new Hls({enableWorker:true});' +
+          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var lvl=hls.levels[0]&&hls.levels[0].details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration));vid.play().catch(function(){tapToPlay();});});' +
+          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
+          'hls.on(Hls.Events.ERROR,function(_,d){' +
+            'console.log("[vg-91p:error]",d);' +
+            'if(!d.fatal)return;' +
+            'retryCount++;' +
+            'var fragU=(d.frag&&d.frag.url)?(" · "+String(d.frag.url).slice(-70)):"";' +
+            'if(retryCount>MAX_RETRY){' +
+              'hls.destroy();' +
+              'if(tryNative("hls.js 重试无效"))return;' +
+              'setStatus("❌ 播放失败(重试"+MAX_RETRY+"次无效): "+d.type+"/"+d.details+fragU);return;' +
+            '}' +
+            'setStatus("⚠ "+d.type+"/"+d.details+fragU+" 恢复中("+retryCount+"/"+MAX_RETRY+")...");' +
+            'try{' +
+              'if(d.type===Hls.ErrorTypes.NETWORK_ERROR){hls.startLoad();}' +
+              'else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){hls.recoverMediaError();}' +
+              'else{hls.destroy();if(tryNative(d.type))return;setStatus("❌ 播放失败(无法恢复): "+d.type+"/"+d.details+fragU);}' +
+            '}catch(e){setStatus("❌ 恢复出错: "+e.message);}' +
+          '});' +
+          'var blob=new Blob([m3u8Text],{type:"application/vnd.apple.mpegurl"});' +
+          'var blobUrl=URL.createObjectURL(blob);' +
+          'hls.loadSource(blobUrl);' +
+          'hls.attachMedia(vid);' +
+        '}else if(vid.canPlayType("application/vnd.apple.mpegurl")){' +
+          'if(!tryNative())setStatus("❌ 当前浏览器既不支持 MSE 也不支持原生 HLS");' +
+        '}else{' +
+          'setStatus("❌ 当前浏览器既不支持 MSE 也不支持原生 HLS");' +
+        '}' +
       '})();</script>' +
       '</body></html>';
   }
 
-  function mountInNewTab(playerWin, title, m3u8Text) {
+  function mountInNewTab(playerWin, title, m3u8Text, m3u8Url) {
     if (!playerWin) {
       alert('[vg-91p] 新标签页被浏览器拦截了, 请允许弹窗后重试');
       return;
     }
     try {
       playerWin.document.open();
-      playerWin.document.write(buildPlayerHtml(title, m3u8Text));
+      playerWin.document.write(buildPlayerHtml(title, m3u8Text, m3u8Url));
       playerWin.document.close();
     } catch (e) {
       try { playerWin.close(); } catch (e2) {}
@@ -522,11 +547,11 @@
         if (!sourceURL) throw new Error('该条目无 sourceURL');
       }
       log('目标: ' + title.slice(0, 30) + ' sourceURL=' + sourceURL.slice(0, 40));
-      var m3u8Text = await fetchM3u8Text(auth.token, sourceURL);
-      var frags = (m3u8Text.match(/EXTINF/g) || []).length;
+      var mm = await fetchM3u8Text(auth.token, sourceURL);
+      var frags = (mm.text.match(/EXTINF/g) || []).length;
       log('m3u8 OK: ' + frags + ' 片段');
-      var prepared = await injectKey(m3u8Text, auth.token);
-      mountInNewTab(playerWin, title + ' (' + frags + 'frags)', prepared);
+      var prepared = await injectKey(mm.text, auth.token);
+      mountInNewTab(playerWin, title + ' (' + frags + 'frags)', prepared, mm.url);
     } catch (e) {
       if (playerWin) {
         try {
