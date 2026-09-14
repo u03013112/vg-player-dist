@@ -467,14 +467,14 @@
         '}' +
         'if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
-          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){tapToPlay();});function judge(total){if(vid.currentTime>0.5){diagLock=false;setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+vc);return;}if(total&&vid.networkState!==2){diagLock=true;setStatus("❌ 播放未启动("+total+"s)");alert("[vg-91p] ❌ 播放未启动("+total+"s)\nreadyState="+vid.readyState+" codec="+vc+" netState="+vid.networkState+"\nfrags="+(lvl?lvl.fragments.length+"/"+fmt(lvl.totalduration):"?")+"\n若反复出现请截图此弹窗反馈");console.error("[vg-91p-diag] play-fail codec="+vc);}else{setStatus(total>5?("⏳ 缓冲中 "+total+"s (网络活动中, 大清单首载较慢)..."):"⏳ 缓冲中...");setTimeout(function(){judge((total||0)+10);},10000);}}setTimeout(function(){judge(5);},5000);});' +
+          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){tapToPlay();});function judge(total){if(vid.currentTime>0.5){diagLock=false;setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+vc);return;}if(total&&vid.networkState!==2){diagLock=true;setStatus("❌ 播放未启动("+total+"s)");alert("[vg-91p] ❌ 播放未启动("+total+"s)\\nreadyState="+vid.readyState+" codec="+vc+" netState="+vid.networkState+"\\nfrags="+(lvl?lvl.fragments.length+"/"+fmt(lvl.totalduration):"?")+"\\n若反复出现请截图此弹窗反馈");console.error("[vg-91p-diag] play-fail codec="+vc);}else{setStatus(total>5?("⏳ 缓冲中 "+total+"s (网络活动中, 大清单首载较慢)..."):"⏳ 缓冲中...");setTimeout(function(){judge((total||0)+10);},10000);}}setTimeout(function(){judge(5);},5000);});' +
           'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(vid.currentTime>0.5)diagLock=false;if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
           'hls.on(Hls.Events.ERROR,function(_,d){' +
             'console.log("[vg-91p:error]",d);' +
             'if(!d.fatal)return;' +
             'window.__vg_alerted=window.__vg_alerted||{};' +
             'var ek=d.type+"/"+d.details;' +
-            'if(!window.__vg_alerted[ek]){window.__vg_alerted[ek]=1;alert("[vg-91p] ❌ 播放错误: "+ek+(d.frag&&d.frag.url?("\n失败分片: "+String(d.frag.url).slice(-80)):"")+"\n(尝试自动恢复中...)");}' +
+            'if(!window.__vg_alerted[ek]){window.__vg_alerted[ek]=1;alert("[vg-91p] ❌ 播放错误: "+ek+(d.frag&&d.frag.url?("\\n失败分片: "+String(d.frag.url).slice(-80)):"")+"\\n(尝试自动恢复中...)");}' +
             'if(d.details==="fragParsingError"){hls.destroy();if(tryNative("fragParsingError"))return;}' +
             'retryCount++;' +
             'var fragU=(d.frag&&d.frag.url)?(" · "+String(d.frag.url).slice(-70)):"";' +
