@@ -475,8 +475,7 @@
             'window.__vg_alerted=window.__vg_alerted||{};' +
             'var ek=d.type+"/"+d.details;' +
             'if(!window.__vg_alerted[ek]){window.__vg_alerted[ek]=1;alert("[vg-91p] ❌ 播放错误: "+ek+(d.frag&&d.frag.url?("\\n失败分片: "+String(d.frag.url).slice(-80)):"")+"\\n(尝试自动恢复中...)");}' +
-            'if(d.details==="fragParsingError"){hls.destroy();if(tryNative("fragParsingError"))return;}' +
-            'retryCount++;' +
+                        'retryCount++;' +
             'var fragU=(d.frag&&d.frag.url)?(" · "+String(d.frag.url).slice(-70)):"";' +
             'if(retryCount>MAX_RETRY){' +
               'hls.destroy();' +
