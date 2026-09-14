@@ -31,7 +31,7 @@
   // (App 登录成功后存在 localStorage["token"]), 仅在其失败时才尝试全新注册。
   // ==========================================================================
 
-  var TARGET_HOSTNAME = 'd1q9vvaj8cdkjj.cloudfront.net';
+  var TARGET_HOSTNAME = 'd2rfdhg87vokyr.cloudfront.net';
   var API_BASE = '/api/app';
   var REQ_SIGN_KEY = 'kaFttDJRcahRMTI7';
   var INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
