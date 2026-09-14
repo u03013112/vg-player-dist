@@ -33,7 +33,7 @@
   var PARAM_IV = 'BxJand%xf5h3sycH';
   var INTERFACE_KEY = '65dc07d1b7915c6b2937432b091837a7';
   var CRYPTO_JS_SRC = 'https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js';
-  var HLS_JS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
+  var HLS_JS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1.6.19/dist/hls.min.js';
   var LS_TOKEN_KEY = 'vg91p_stored_token';
 
   var log = function (m) { try { console.log('[vg-91p]', m); } catch (e) {} };
@@ -377,7 +377,7 @@
           '</div>' +
         '</div>' +
       '</div>' +
-      '<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>' +
+      '<script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.19/dist/hls.min.js"></script>' +
       '<script>(function(){' +
         'var m3u8Text=' + m3u8Json + ';' +
         'var realUrl=' + realUrlJson + ';' +
@@ -464,10 +464,7 @@
           'vid.play().catch(function(){tapToPlay();});' +
           'return true;' +
         '}' +
-        'var isIOS=/iP(ad|hone|od)/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);' +
-        'if(isIOS&&vid.canPlayType("application/vnd.apple.mpegurl")){' +
-          'if(!tryNative())setStatus("❌ iOS 原生播放不可用");' +
-        '}else if(window.Hls&&Hls.isSupported()){' +
+        'if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
           'hls.on(Hls.Events.MANIFEST_PARSED,function(){var lvl=hls.levels[0]&&hls.levels[0].details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration));vid.play().catch(function(){tapToPlay();});});' +
           'hls.on(Hls.Events.FRAG_LOADED,function(_,d){setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
