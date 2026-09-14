@@ -510,13 +510,17 @@
           'vid.play().catch(function(){tapToPlay();});' +
           'return true;' +
         '}' +
-        'if(window.Hls&&Hls.isSupported()){' +
+        'var isIOS=/iP(ad|hone|od)/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);' +
+        'if(isIOS&&vid.canPlayType("application/vnd.apple.mpegurl")){' +
+          'if(!tryNative())setStatus("❌ iOS 原生播放不可用");' +
+        '}else if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
           'hls.on(Hls.Events.MANIFEST_PARSED,function(){var lvl=hls.levels[0]&&hls.levels[0].details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration));vid.play().catch(function(){tapToPlay();});});' +
           'hls.on(Hls.Events.FRAG_LOADED,function(_,d){setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
           'hls.on(Hls.Events.ERROR,function(_,d){' +
             'console.log("[vg-bili:error]",d);' +
             'if(!d.fatal)return;' +
+            'if(d.details==="fragParsingError"){hls.destroy();if(tryNative("fragParsingError"))return;}' +
             'retryCount++;' +
             'var fragU=(d.frag&&d.frag.url)?(" · "+String(d.frag.url).slice(-70)):"";' +
             'if(retryCount>MAX_RETRY){' +
