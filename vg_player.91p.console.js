@@ -224,16 +224,20 @@
     if (stored) { log('使用书签缓存 token'); return { token: stored, fresh: false }; }
     // 3) 全新注册(每次新号 watchCount=3; IP 限频 4007 时走不到这)
     try {
-      var j = await apiCall('/mine/login/h5',
-        { devID: uuid32(), sysType: 'ios', cutInfos: '', isAppStore: false }, '', 'POST');
-      if (j.code === 200 && j.data && j.data.token) {
-        log('全新账号登录成功 uid=' + j.data.uid + ' watchCount=' + j.data.watchCount);
-        localStorage.setItem(LS_TOKEN_KEY, j.data.token);
-        return { token: j.data.token, fresh: true };
-      }
-      log('登录 code=' + j.code + ' tip=' + (j.tip || j.msg || ''));
+      return { token: await registerFresh(), fresh: true };
     } catch (e) { log('注册登录失败: ' + e.message); }
     throw new Error('无法取得 token: 站方未登录且新号注册被限频(4007), 请等几分钟或先在站内登录');
+  }
+
+  async function registerFresh() {
+    var j = await apiCall('/mine/login/h5',
+      { devID: uuid32(), sysType: 'ios', cutInfos: '', isAppStore: false }, '', 'POST');
+    if (j.code === 200 && j.data && j.data.token) {
+      log('全新账号登录成功 uid=' + j.data.uid + ' watchCount=' + j.data.watchCount);
+      localStorage.setItem(LS_TOKEN_KEY, j.data.token);
+      return j.data.token;
+    }
+    throw new Error('登录 code=' + j.code + ' tip=' + (j.tip || j.msg || ''));
   }
 
   async function getVidFromUrl() {
@@ -286,6 +290,16 @@
       } catch (e) { lastErr = e.message; log('m3u8 主机失败 ' + hosts[h] + ': ' + e.message); }
     }
     throw new Error(lastErr || 'm3u8 全部主机失败');
+  }
+
+  // 91p 服务端在路径/额度异常时不报错、静默回吐兜底预告片(实测 13.5s 单片),
+  // 原生播放器会无声播完预告即结束 —— 用户完全无从 debug。拿到 m3u8 先体检:
+  // 短清单 = 预告 → 刷额度重试, 仍预告则明确报错。
+  function inspectM3u8(text) {
+    var frags = (text.match(/#EXTINF/g) || []).length;
+    var dur = 0, re = /#EXTINF:([\d.]+)/g, m;
+    while ((m = re.exec(text))) dur += parseFloat(m[1]);
+    return { frags: frags, duration: Math.round(dur), isPreview: dur > 0 && dur < 90 };
   }
 
   async function fetchKeyBytes(token) {
@@ -552,10 +566,26 @@
       }
       log('目标: ' + title.slice(0, 30) + ' sourceURL=' + sourceURL.slice(0, 40));
       var mm = await fetchM3u8Text(auth.token, sourceURL);
-      var frags = (mm.text.match(/EXTINF/g) || []).length;
-      log('m3u8 OK: ' + frags + ' 片段');
+      var mi = inspectM3u8(mm.text);
+      log('m3u8 OK: ' + mi.frags + ' 片段 / ' + mi.duration + 's' + (mi.isPreview ? ' ⚠疑似预告片' : ''));
+      if (mi.isPreview && !auth.fresh) {
+        // 缓存/站方 token 额度可能已耗尽(服务端静默回吐预告): 弃缓存强制新号重试一次
+        log('⚠ 拿到的是 ' + mi.duration + 's 预告片 — token 额度可能耗尽, 弃缓存强制新号重试...');
+        localStorage.removeItem(LS_TOKEN_KEY);
+        auth = { token: await registerFresh(), fresh: true };
+        var ji2 = await apiCall('/vid/info', { videoID: vid }, auth.token, 'GET');
+        if (ji2.code !== 200 || !ji2.data || !(ji2.data.sourceURL || ''))
+          throw new Error('刷新额度后 vid/info 仍无 sourceURL code=' + ji2.code);
+        sourceURL = ji2.data.sourceURL;
+        mm = await fetchM3u8Text(auth.token, sourceURL);
+        mi = inspectM3u8(mm.text);
+        log('重试 m3u8: ' + mi.frags + ' 片段 / ' + mi.duration + 's' + (mi.isPreview ? ' ⚠仍是预告' : ''));
+      }
+      if (mi.isPreview) {
+        throw new Error('服务端只返回 ' + mi.duration + 's 预告片(非正片) — 新号额度刷新也无效, 该视频可能本身无正片权限');
+      }
       var prepared = await injectKey(mm.text, auth.token);
-      mountInNewTab(playerWin, title + ' (' + frags + 'frags)', prepared, mm.url);
+      mountInNewTab(playerWin, title + ' (' + mi.frags + 'frags/' + mi.duration + 's)', prepared, mm.url);
     } catch (e) {
       if (playerWin) {
         try {
