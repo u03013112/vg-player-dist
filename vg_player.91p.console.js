@@ -467,8 +467,8 @@
         '}' +
         'if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
-          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){tapToPlay();});setTimeout(function(){if(vid.currentTime<0.5){diagLock=true;setStatus("❌ 播放未启动(5s): readyState="+vid.readyState+" codec="+vc+" netState="+vid.networkState+(lvl?(" frags="+lvl.fragments.length+"/"+fmt(lvl.totalduration)):""));console.error("[vg-91p-diag] play-fail codec="+vc+" frags="+(lvl?lvl.fragments.length:"?"));}else{setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+vc);}},5000);});' +
-          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
+          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){tapToPlay();});function judge(total){if(vid.currentTime>0.5){diagLock=false;setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+vc);return;}if(total&&vid.networkState!==2){diagLock=true;setStatus("❌ 播放未启动("+total+"s): readyState="+vid.readyState+" codec="+vc+" netState="+vid.networkState+" frags="+(lvl?lvl.fragments.length+"/"+fmt(lvl.totalduration):"?"));console.error("[vg-91p-diag] play-fail codec="+vc);}else{setStatus(total>5?("⏳ 缓冲中 "+total+"s (网络活动中, 大清单首载较慢)..."):"⏳ 缓冲中...");setTimeout(function(){judge((total||0)+10);},10000);}}setTimeout(function(){judge(5);},5000);});' +
+          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(vid.currentTime>0.5)diagLock=false;if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
           'hls.on(Hls.Events.ERROR,function(_,d){' +
             'console.log("[vg-91p:error]",d);' +
             'if(!d.fatal)return;' +
