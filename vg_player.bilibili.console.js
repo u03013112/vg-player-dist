@@ -267,7 +267,10 @@
     var info = outer.mediaInfo || outer;
     if (!info.videoUrl) throw new Error('videoUrl 为空 (code=' + outer.code + ' ' + outer.msg + ')');
     log('media/play: playable=' + outer.playable + ' msg=' + outer.msg + ' videoUrl=' + info.videoUrl.slice(0, 50));
-    return { title: info.title || '', videoUrl: info.videoUrl };
+    // preFileName 泄露(2026-09-15 抓包证实): 访客未购买时 videoUrl 是广告替代片,
+    // 站方自己的播放器实际加载 preFileName 指向的真实路径, 交给 resolveRecord 裁决。
+    if (info.preFileName) log('preFileName 泄露: ' + String(info.preFileName).slice(0, 60));
+    return { title: info.title || '', videoUrl: info.videoUrl, preFileName: info.preFileName || '' };
   }
 
   // 构造签名的 m3u8 URL 并下载内容。
@@ -349,13 +352,30 @@
         throw e;
       }
     }
-    var m3u8 = await fetchM3u8Content(auth.token, media.videoUrl);
-    var prepared = await injectKey(m3u8.text, auth.token);
+    // 双候选取最长清单(ks 同款候选法): preFileName 是真实路径, videoUrl 兜底。
+    // 分片数用严格 #EXTINF 行计数 —— 站方兜底预告片故意写成 "#  EXTINF:"(带空格),
+    // 恰好计 0 片而被自动淘汰。
+    var candidates = [];
+    if (media.preFileName && media.preFileName !== media.videoUrl) candidates.push(media.preFileName);
+    candidates.push(media.videoUrl);
+    var picked = null;
+    for (var ci = 0; ci < candidates.length; ci++) {
+      try {
+        var cand = await fetchM3u8Content(auth.token, candidates[ci]);
+        var fragCount = (cand.text.match(/^#EXTINF:[\d.]+,$/gm) || []).length;
+        log('候选' + (ci + 1) + ': ' + fragCount + ' 片 (' + candidates[ci].slice(0, 46) + '...)');
+        if (!picked || fragCount > picked.fragCount) {
+          picked = { fragCount: fragCount, m3u8: cand };
+        }
+      } catch (e) {
+        log('候选' + (ci + 1) + ' 失败: ' + e.message);
+      }
+    }
+    if (!picked) throw new Error('所有 m3u8 候选均失败');
+    var prepared = await injectKey(picked.m3u8.text, auth.token);
+    log('m3u8 准备完成: ' + picked.fragCount + ' 个 ts 片段, 标题=' + media.title.slice(0, 30));
 
-    var tsCount = (m3u8.text.match(/\.ts/g) || []).length;
-    log('m3u8 准备完成: ' + tsCount + ' 个 ts 片段, 标题=' + media.title.slice(0, 30));
-
-    return { title: media.title, m3u8Text: prepared, realUrl: m3u8.url };
+    return { title: media.title, m3u8Text: prepared, realUrl: picked.m3u8.url };
   }
 
   // ==========================================================================
