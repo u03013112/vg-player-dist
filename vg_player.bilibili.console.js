@@ -586,8 +586,11 @@
       catch (e) {}
     }
     try {
-      if (location.hostname !== TARGET_HOSTNAME) {
-        throw new Error('当前站点不是 ' + TARGET_HOSTNAME + ' (哔哩视频)');
+      // 站方可能用多个 CloudFront 域名轮换分发同一后端(欲漫涩书签实测确认
+      // 有此现象), 硬校验单一域名会在轮换到未覆盖域名时误拦真实用户; API
+      // 全走相对路径本身就绑定当前域, 这里只做非阻断提示。
+      if (!/\.cloudfront\.net$/.test(location.hostname)) {
+        log('⚠ 当前域名(' + location.hostname + ')不是常见 CloudFront 分发, 仍尝试继续');
       }
       var id = getIdFromUrl();
       if (!id) {

@@ -587,8 +587,11 @@
       catch (e) {}
     }
     try {
-      if (location.hostname !== TARGET_HOSTNAME) {
-        throw new Error('当前站点不是 ' + TARGET_HOSTNAME + ' (欲漫涩)');
+      // 站方用多个 CloudFront 域名轮换分发同一后端(实测确认), 硬校验单一域名
+      // 会在轮换到未覆盖域名时误拦真实用户; API 全走相对路径本身就绑定当前域,
+      // 这里只做非阻断提示。
+      if (!/\.cloudfront\.net$/.test(location.hostname)) {
+        log('⚠ 当前域名(' + location.hostname + ')不是常见 CloudFront 分发, 仍尝试继续');
       }
       var id = getIdFromUrl();
       if (!id) {
