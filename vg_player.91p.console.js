@@ -373,6 +373,7 @@
       '</style></head><body>' +
       '<div id="wrap">' +
         '<div id="bar"><span id="status">加载中...</span><div class="btns">' +
+          '<button id="muteBtn" style="background:#e80;">🔇 声音</button>' +
           '<button id="rotateBtn" style="background:#37a;">⟳ 旋转</button>' +
           '<button id="fsBtn" style="background:#555;">⛶ 全屏</button>' +
           '<button id="closeBtn" style="background:#e33;">× 关闭</button>' +
@@ -409,6 +410,11 @@
         'function setStatus(s){status.textContent=s;}' +
         'setStatus(titleText||"loading...");' +
         'document.getElementById("closeBtn").onclick=function(){window.close();};' +
+        'var muteBtn=document.getElementById("muteBtn");' +
+        'function syncMuteBtn(){muteBtn.textContent=vid.muted?"🔇 声音":"🔊 声音";muteBtn.style.background=vid.muted?"#e80":"#2a7";}' +
+        'muteBtn.onclick=function(){vid.muted=!vid.muted;if(!vid.muted){vid.play().catch(function(e){setStatus("play() "+e.message);});}};' +
+        'vid.addEventListener("volumechange",syncMuteBtn);' +
+        'syncMuteBtn();' +
         'pp.onclick=function(){vid.paused?vid.play():vid.pause();};' +
         'document.querySelectorAll(".seek").forEach(function(b){b.onclick=function(){vid.currentTime=Math.max(0,Math.min(vid.duration||0,vid.currentTime+parseFloat(b.dataset.d)));};});' +
         'document.getElementById("hideBtn").onclick=function(){floatBox.style.display="none";};' +
@@ -467,7 +473,7 @@
         '}' +
         'tick();' +
         'function bindUnmuteOnTap(){vid.onclick=function(){vid.muted=false;vid.play().catch(function(e){setStatus("play() "+e.message);});};}' +
-        'function tapToPlay(){setStatus("▶ 点击画面播放(恢复声音)");bindUnmuteOnTap();}' +
+        'function tapToPlay(){setStatus("▶ 点🔊声音按钮播放");bindUnmuteOnTap();}' +
         'var nativeStarted=false;' +
         'function tryNative(reason){' +
           'if(nativeStarted||!realUrl)return false;' +
@@ -475,12 +481,12 @@
           'setStatus(titleText+" · 切换系统播放器(原生 HLS)"+(reason?" ["+reason+"]":"")+"...");' +
           'vid.src=realUrl;' +
           'vid.addEventListener("loadedmetadata",function(){setStatus(titleText+" · "+fmt(vid.duration));});' +
-          'vid.play().catch(function(){vid.muted=true;vid.play().then(function(){bindUnmuteOnTap();setStatus(titleText+" · 播放中(静音,点画面恢复声音)");}).catch(function(){tapToPlay();});});' +
+          'vid.play().catch(function(){vid.muted=true;vid.play().then(function(){bindUnmuteOnTap();setStatus(titleText+" · 播放中(静音,点🔊声音按钮恢复)");}).catch(function(){tapToPlay();});});' +
           'return true;' +
         '}' +
         'if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
-          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){vid.muted=true;vid.play().catch(function(){tapToPlay();});});function judge(total){if(vid.currentTime>0.5){diagLock=false;if(vid.muted)bindUnmuteOnTap();setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+(vid.muted?"(静音,点画面恢复声音)":vc));return;}var bf=vid.buffered.length?vid.buffered.end(vid.buffered.length-1):0;if(total&&vid.paused&&bf>0.5){setStatus("▶ 数据已就绪("+fmt(bf)+"s) 点击画面播放");setTimeout(function(){judge((total||0)+10);},10000);return;}if(total&&vid.networkState!==2){diagLock=true;setStatus("❌ 播放未启动("+total+"s)");alert("[vg-91p] 播放未启动 | readyState="+vid.readyState+" paused="+vid.paused+" buffered="+fmt(bf)+"s codec="+vc+" netState="+vid.networkState+" frags="+(lvl?lvl.fragments.length+"/"+fmt(lvl.totalduration):"?")+" | 反复出现请截图反馈");console.error("[vg-91p-diag] play-fail codec="+vc);}else{setStatus(total>5?("⏳ 缓冲中 "+total+"s (网络活动中, 大清单首载较慢)..."):"⏳ 缓冲中...");setTimeout(function(){judge((total||0)+10);},10000);}}setTimeout(function(){judge(5);},5000);});' +
+          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){vid.muted=true;vid.play().catch(function(){tapToPlay();});});function judge(total){if(vid.currentTime>0.5){diagLock=false;if(vid.muted)bindUnmuteOnTap();setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+(vid.muted?"(静音,点🔊声音按钮恢复)":vc));return;}var bf=vid.buffered.length?vid.buffered.end(vid.buffered.length-1):0;if(total&&vid.paused&&bf>0.5){setStatus("▶ 数据已就绪("+fmt(bf)+"s) 点击画面播放");setTimeout(function(){judge((total||0)+10);},10000);return;}if(total&&vid.networkState!==2){diagLock=true;setStatus("❌ 播放未启动("+total+"s)");alert("[vg-91p] 播放未启动 | readyState="+vid.readyState+" paused="+vid.paused+" buffered="+fmt(bf)+"s codec="+vc+" netState="+vid.networkState+" frags="+(lvl?lvl.fragments.length+"/"+fmt(lvl.totalduration):"?")+" | 反复出现请截图反馈");console.error("[vg-91p-diag] play-fail codec="+vc);}else{setStatus(total>5?("⏳ 缓冲中 "+total+"s (网络活动中, 大清单首载较慢)..."):"⏳ 缓冲中...");setTimeout(function(){judge((total||0)+10);},10000);}}setTimeout(function(){judge(5);},5000);});' +
           'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(vid.currentTime>0.5)diagLock=false;if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
           'hls.on(Hls.Events.ERROR,function(_,d){' +
             'console.log("[vg-91p:error]",d);' +
