@@ -31,7 +31,7 @@
   // (App 登录成功后存在 localStorage["token"]), 仅在其失败时才尝试全新注册。
   // ==========================================================================
 
-  var TARGET_HOSTNAME = 'd2rfdhg87vokyr.cloudfront.net';
+  var TARGET_HOSTNAME = 'd1q9vvaj8cdkjj.cloudfront.net';
   var API_BASE = '/api/app';
   var REQ_SIGN_KEY = 'kaFttDJRcahRMTI7';
   var INTERFACE_KEY = 'vEukA&w15z4VAD3kAY#fkL#rBnU!WDhN';
@@ -273,6 +273,8 @@
 
   // 构造签名的 m3u8 URL 并下载内容。
   // m3u8 URL 签名时 XUserAgent 传空字符串(逆向自站方 encode_play_url, 同 OIO)。
+  // 同时返回绝对 URL(url): 原生 HLS 兜底时直接交给系统播放器, 不受 MSE/Blob
+  // 清单限制(WebKit 原生播放器拒绝 Blob 清单, 91p 书签同款问题实测证实)。
   async function fetchM3u8Content(token, videoUrl) {
     var path = API_BASE + '/media/h5/m3u8/' + videoUrl.replace(/^\/+/, '');
     var sig = computeSign(token, path, '');
@@ -290,7 +292,7 @@
       var j = JSON.parse(text);
       throw new Error('m3u8 错误: ' + (j.tip || j.msg || 'code ' + j.code));
     }
-    return text;
+    return { text: text, url: location.origin + url };
   }
 
   // 按 m3u8 里 #EXT-X-KEY 声明的 URI 动态获取 AES-128 密钥。
@@ -332,20 +334,6 @@
     return replaced;
   }
 
-  // 原生 HLS(系统播放器)专用清单: KEY URI 改写为带签名的绝对 URL。
-  // 系统播放器自己拉 key, 不走书签的签名逻辑 —— OIO 代 key 端点需要
-  // token/timestamp/sign/nonce 签名, 裸 URI 会被拒; 签名形式与 fetchKey 一致(已实测)。
-  function buildNativeM3u8(m3u8Text, token) {
-    var m = m3u8Text.match(/#EXT-X-KEY:METHOD=AES-128,URI="([^"]*)"/);
-    if (!m) return m3u8Text;
-    var path = m[1].split('?')[0];
-    var abs = /^https?:\/\//.test(path) ? path : location.origin + path;
-    var sig = computeSign(token, path, '');
-    var signed = abs + '?token=' + encodeURIComponent(token) +
-      '&timestamp=' + sig.ts + '&sign=' + sig.sign + '&nonce=' + sig.nonce;
-    return m3u8Text.replace(/(#EXT-X-KEY:METHOD=AES-128,URI=")[^"]*(")/, '$1' + signed + '$2');
-  }
-
   // 完整流程: 拿 token → media/play → 下载 m3u8 → 动态获取 key 并注入 → 返回
   async function resolveRecord(id) {
     var auth = await getAuth();
@@ -362,14 +350,13 @@
         throw e;
       }
     }
-    var m3u8Text = await fetchM3u8Content(auth.token, media.videoUrl);
-    var prepared = await injectKey(m3u8Text, auth.token);
-    var nativeText = buildNativeM3u8(m3u8Text, auth.token);
+    var m3u8 = await fetchM3u8Content(auth.token, media.videoUrl);
+    var prepared = await injectKey(m3u8.text, auth.token);
 
-    var tsCount = (m3u8Text.match(/\.ts/g) || []).length;
+    var tsCount = (m3u8.text.match(/\.ts/g) || []).length;
     log('m3u8 准备完成: ' + tsCount + ' 个 ts 片段, 标题=' + media.title.slice(0, 30));
 
-    return { title: media.title, m3u8Text: prepared, nativeText: nativeText };
+    return { title: media.title, m3u8Text: prepared, realUrl: m3u8.url };
   }
 
   // ==========================================================================
@@ -384,11 +371,11 @@
     try { return window.open('', '_blank'); } catch (e) { return null; }
   }
 
-  function buildPlayerHtml(title, m3u8Text, nativeM3u8Text) {
+  function buildPlayerHtml(title, m3u8Text, realUrl) {
     var titleSafe = (title || 'VG Player YMS').replace(/</g, '&lt;');
     var m3u8Json = JSON.stringify(m3u8Text);
     var titleJson = JSON.stringify(title || '');
-    var nativeJson = JSON.stringify(nativeM3u8Text || '');
+    var realUrlJson = JSON.stringify(realUrl || '');
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">' +
       '<title>' + titleSafe + '</title>' +
@@ -407,6 +394,7 @@
       '</style></head><body>' +
       '<div id="wrap">' +
         '<div id="bar"><span id="status">加载中...</span><div class="btns">' +
+          '<button id="muteBtn" style="background:#e80;">🔇 声音</button>' +
           '<button id="rotateBtn" style="background:#37a;">⟳ 旋转</button>' +
           '<button id="fsBtn" style="background:#555;">⛶ 全屏</button>' +
           '<button id="closeBtn" style="background:#e33;">× 关闭</button>' +
@@ -427,7 +415,7 @@
       '<script>(function(){' +
         'var diagLock=false;' +
         'var m3u8Text=' + m3u8Json + ';' +
-        'var nativeText=' + nativeJson + ';' +
+        'var realUrl=' + realUrlJson + ';' +
         'var titleText=' + titleJson + ';' +
         'var wrap=document.getElementById("wrap");' +
         'var vid=document.getElementById("video");' +
@@ -443,6 +431,11 @@
         'function setStatus(s){status.textContent=s;}' +
         'setStatus(titleText||"loading...");' +
         'document.getElementById("closeBtn").onclick=function(){window.close();};' +
+        'var muteBtn=document.getElementById("muteBtn");' +
+        'function syncMuteBtn(){muteBtn.textContent=vid.muted?"🔇 声音":"🔊 声音";muteBtn.style.background=vid.muted?"#e80":"#2a7";}' +
+        'muteBtn.onclick=function(){vid.muted=!vid.muted;if(!vid.muted){vid.play().catch(function(e){setStatus("play() "+e.message);});}};' +
+        'vid.addEventListener("volumechange",syncMuteBtn);' +
+        'syncMuteBtn();' +
         'pp.onclick=function(){vid.paused?vid.play():vid.pause();};' +
         'document.querySelectorAll(".seek").forEach(function(b){b.onclick=function(){vid.currentTime=Math.max(0,Math.min(vid.duration||0,vid.currentTime+parseFloat(b.dataset.d)));};});' +
         'document.getElementById("hideBtn").onclick=function(){floatBox.style.display="none";};' +
@@ -500,29 +493,25 @@
           'requestAnimationFrame(tick);' +
         '}' +
         'tick();' +
-        'function tapToPlay(){setStatus("▶ 点击画面播放");vid.onclick=function(){vid.play().catch(function(e){setStatus("play() "+e.message);});};}' +
+        'function bindUnmuteOnTap(){vid.onclick=function(){vid.muted=false;vid.play().catch(function(e){setStatus("play() "+e.message);});};}' +
+        'function tapToPlay(){setStatus("▶ 点🔊声音按钮播放");bindUnmuteOnTap();}' +
         'var nativeStarted=false;' +
         'function tryNative(reason){' +
-          'if(nativeStarted||!nativeText)return false;' +
+          'if(nativeStarted||!realUrl)return false;' +
           'nativeStarted=true;' +
           'setStatus(titleText+" · 切换系统播放器(原生 HLS)"+(reason?" ["+reason+"]":"")+"...");' +
-          'var nb=new Blob([nativeText],{type:"application/vnd.apple.mpegurl"});' +
-          'vid.src=URL.createObjectURL(nb);' +
+          'vid.src=realUrl;' +
           'vid.addEventListener("loadedmetadata",function(){setStatus(titleText+" · "+fmt(vid.duration));});' +
-          'vid.play().catch(function(){tapToPlay();});' +
+          'vid.play().catch(function(){vid.muted=true;vid.play().then(function(){bindUnmuteOnTap();setStatus(titleText+" · 播放中(静音,点🔊声音按钮恢复)");}).catch(function(){tapToPlay();});});' +
           'return true;' +
         '}' +
-        'var isIOS=/iP(ad|hone|od)/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);' +
-        'if(isIOS&&vid.canPlayType("application/vnd.apple.mpegurl")){' +
-          'if(!tryNative())setStatus("❌ iOS 原生播放不可用");' +
-        '}else if(window.Hls&&Hls.isSupported()){' +
+        'if(window.Hls&&Hls.isSupported()){' +
           'var hls=new Hls({enableWorker:true});' +
-          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){tapToPlay();});setTimeout(function(){if(vid.currentTime<0.5){diagLock=true;setStatus("❌ 播放未启动(5s): readyState="+vid.readyState+" codec="+vc+" netState="+vid.networkState+(lvl?(" frags="+lvl.fragments.length+"/"+fmt(lvl.totalduration)):""));console.error("[vg-diag] play-fail codec="+vc+" frags="+(lvl?lvl.fragments.length:"?"));}else{setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+vc);}},5000);});' +
-          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
+          'hls.on(Hls.Events.MANIFEST_PARSED,function(){var L0=hls.levels[0]||{};var vc=L0.videoCodec||"?";var lvl=L0.details;if(lvl)setStatus(titleText+" · "+lvl.fragments.length+" frags · "+fmt(lvl.totalduration)+" · "+vc);vid.play().catch(function(){vid.muted=true;vid.play().catch(function(){tapToPlay();});});function judge(total){if(vid.currentTime>0.5){diagLock=false;if(vid.muted)bindUnmuteOnTap();setStatus("✅ 播放中 "+fmt(vid.currentTime)+"s · "+(vid.muted?"(静音,点🔊声音按钮恢复)":vc));return;}var bf=vid.buffered.length?vid.buffered.end(vid.buffered.length-1):0;if(total&&vid.paused&&bf>0.5){setStatus("▶ 数据已就绪("+fmt(bf)+"s) 点击画面播放");setTimeout(function(){judge((total||0)+10);},10000);return;}if(total&&vid.networkState!==2){diagLock=true;setStatus("❌ 播放未启动("+total+"s)");console.error("[vg-diag] play-fail codec="+vc);}else{setStatus(total>5?("⏳ 缓冲中 "+total+"s (网络活动中, 大清单首载较慢)..."):"⏳ 缓冲中...");setTimeout(function(){judge((total||0)+10);},10000);}}setTimeout(function(){judge(5);},5000);});' +
+          'hls.on(Hls.Events.FRAG_LOADED,function(_,d){if(vid.currentTime>0.5)diagLock=false;if(diagLock)return;setStatus(titleText+" · frag "+d.frag.sn+" · "+fmt(vid.currentTime)+" / "+fmt(vid.duration));});' +
           'hls.on(Hls.Events.ERROR,function(_,d){' +
             'console.log("[vg-yms:error]",d);' +
             'if(!d.fatal)return;' +
-            'if(d.details==="fragParsingError"){hls.destroy();if(tryNative("fragParsingError"))return;}' +
             'retryCount++;' +
             'var fragU=(d.frag&&d.frag.url)?(" · "+String(d.frag.url).slice(-70)):"";' +
             'if(retryCount>MAX_RETRY){' +
@@ -550,14 +539,14 @@
       '</body></html>';
   }
 
-  function mountInNewTab(playerWin, title, m3u8Text, nativeM3u8Text) {
+  function mountInNewTab(playerWin, title, m3u8Text, realUrl) {
     if (!playerWin) {
       alert('[vg-yms] 新标签页被浏览器拦截了,请允许此站点弹窗后重试');
       return;
     }
     try {
       playerWin.document.open();
-      playerWin.document.write(buildPlayerHtml(title, m3u8Text, nativeM3u8Text));
+      playerWin.document.write(buildPlayerHtml(title, m3u8Text, realUrl));
       playerWin.document.close();
     } catch (e) {
       try { playerWin.close(); } catch (e2) {}
@@ -610,7 +599,7 @@
       await loadScript(CRYPTO_JS_SRC, 'CryptoJS');
       log('CryptoJS 就绪, 开始处理: id=' + id);
       var result = await resolveRecord(id);
-      mountInNewTab(playerWin, result.title, result.m3u8Text, result.nativeText);
+      mountInNewTab(playerWin, result.title, result.m3u8Text, result.realUrl);
     } catch (e) {
       if (playerWin) {
         try { playerWin.document.open(); playerWin.document.write(errorHtml(e.message)); playerWin.document.close(); }
