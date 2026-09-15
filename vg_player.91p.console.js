@@ -302,24 +302,36 @@
     return { frags: frags, duration: Math.round(dur), isPreview: dur > 0 && dur < 90 };
   }
 
-  async function fetchKeyBytes(token) {
-    var hosts = apiHosts();
-    for (var h = 0; h < hosts.length; h++) {
+  // KEY 的 URI 一律从清单 #EXT-X-KEY 行读出(站方换过端点名: sec→m3u8sec,
+  // 硬编码曾导致拿错密钥→解密出垃圾→hls.js "Found no media"→播放未启动)。
+  // 相对路径按各 API 主机逐个解析(与站方播放器把 m3u8 挂在 API 域下同语义)。
+  async function fetchKeyBytes(keyUri) {
+    var cands = [];
+    if (/^https?:\/\//i.test(keyUri)) {
+      cands.push(keyUri);
+    } else {
+      var hosts = apiHosts();
+      for (var h = 0; h < hosts.length; h++) cands.push(hosts[h] + keyUri);
+    }
+    var lastErr = '';
+    for (var i = 0; i < cands.length; i++) {
       try {
-        var r = await fetch(hosts[h] + '/api/app/vid/sec?token=' + encodeURIComponent(token));
+        var r = await fetch(cands[i]);
         var buf = await r.arrayBuffer();
         var bytes = new Uint8Array(buf);
         if (bytes.length === 16) return bytes;
-        log('key 主机 ' + hosts[h] + ' 返回 ' + bytes.length + ' 字节');
-      } catch (e) { log('key 主机失败 ' + hosts[h] + ': ' + e.message); }
+        lastErr = '返回 ' + bytes.length + ' 字节';
+        log('key ' + cands[i].slice(0, 70) + ' -> ' + lastErr);
+      } catch (e) { lastErr = e.message; log('key 失败 ' + cands[i].slice(0, 70) + ': ' + e.message); }
     }
-    throw new Error('AES key 获取失败(全部主机)');
+    throw new Error('AES key 获取失败(' + keyUri + '): ' + lastErr);
   }
 
-  async function injectKey(m3u8Text, token) {
+  async function injectKey(m3u8Text) {
     var m = m3u8Text.match(/#EXT-X-KEY:METHOD=AES-128,URI="([^"]*)"/);
     if (!m) { log('无加密行, 原样使用'); return m3u8Text; }
-    var bytes = await fetchKeyBytes(token);
+    log('加密清单, KEY URI=' + m[1]);
+    var bytes = await fetchKeyBytes(m[1]);
     var s = '';
     for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
     var dataUri = 'data:application/octet-stream;base64,' + btoa(s);
@@ -584,7 +596,7 @@
       if (mi.isPreview) {
         throw new Error('服务端只返回 ' + mi.duration + 's 预告片(非正片) — 新号额度刷新也无效, 该视频可能本身无正片权限');
       }
-      var prepared = await injectKey(mm.text, auth.token);
+      var prepared = await injectKey(mm.text);
       mountInNewTab(playerWin, title + ' (' + mi.frags + 'frags/' + mi.duration + 's)', prepared, mm.url);
     } catch (e) {
       if (playerWin) {
